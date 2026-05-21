@@ -113,6 +113,30 @@ def rain_witness_length(sec, owf):
 
     return sk_bytes, pk_bytes, witness_length
 
+def gw_witness_length(sec, owf):
+    assert owf == "GREATWALL"
+    if sec == 128:
+        witness_length = 2 * 144
+
+        sk_bytes = 144 // 8
+        pk_bytes = 144 // 8
+
+        return sk_bytes, pk_bytes, witness_length
+    if sec == 192:
+        witness_length = 2 * 200
+
+        sk_bytes = 200 // 8
+        pk_bytes = 200 // 8
+
+        return sk_bytes, pk_bytes, witness_length
+    if sec == 256:
+        witness_length = 2 * 264
+
+        sk_bytes = 264 // 8
+        pk_bytes = 264 // 8
+
+        return sk_bytes, pk_bytes, witness_length
+
 def mq_witness_length(sec, owf):
     assert owf[:5] == "MQ_2_"
     field_size = int(owf[5:])
@@ -141,6 +165,8 @@ if __name__ == '__main__':
         sk_bytes, pk_bytes, witness_length = aes_witness_length(sec, owf)
     elif owf in ["RAIN_3", "RAIN_4"]:
         sk_bytes, pk_bytes, witness_length = rain_witness_length(sec, owf)
+    elif owf in ["GREATWALL"]:
+        sk_bytes, pk_bytes, witness_length = gw_witness_length(sec, owf)
     elif owf in ["MQ_2_1", "MQ_2_8"]:
         sk_bytes, pk_bytes, witness_length = mq_witness_length(sec, owf)
     else:

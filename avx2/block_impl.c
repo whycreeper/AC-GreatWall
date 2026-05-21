@@ -57,16 +57,19 @@ extern inline clmul_block clmul_block_mix_64(clmul_block x, clmul_block y);
 
 // 128
 extern inline void block128_inverse(block128* block);
+extern inline void block128_mersenne_inverse(block128* block);
 extern inline void block128_multiply_with_GF2_matrix(block128* block, const uint64_t* matrix);
 extern inline void block128_multiply_with_transposed_GF2_matrix(block128* block, const uint64_t* matrix);
 
 // 192
 extern inline void block192_inverse(block192* block);
+extern inline void block192_mersenne_inverse(block192* block);
 extern inline void block192_multiply_with_GF2_matrix(block192* block, const uint64_t* matrix);
 extern inline void block192_multiply_with_transposed_GF2_matrix(block192* block, const uint64_t* matrix);
 
 // 256
 extern inline void block256_inverse(block256* block);
+extern inline void block256_mersenne_inverse(block256* block);
 extern inline void block256_multiply_with_GF2_matrix(block256* block, const uint64_t* matrix);
 extern inline void block256_multiply_with_transposed_GF2_matrix(block256* block, const uint64_t* matrix);
 

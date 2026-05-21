@@ -234,7 +234,25 @@ inline void test_gen_keypair(unsigned char* pk, unsigned char* sk)
 {
 	do
 	{
-        std::generate(sk, sk + FAEST_SECRET_KEY_BYTES, rand<uint8_t>);
+#if SECURITY_PARAM == 128
+        uint8_t field[18];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[17] &= 0x01;
+		memcpy(sk, field, 18);
+
+#elif SECURITY_PARAM == 192
+        uint8_t field[25];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[24] &= 0x01;
+		memcpy(sk, field, 25);
+
+#elif SECURITY_PARAM == 256
+        uint8_t field[33];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[32] &= 0x01;
+		memcpy(sk, field, 33);
+
+#endif
 	} while (!faest_pubkey(pk, sk));
 }
 

@@ -154,3 +154,4 @@ extern inline quicksilver_vec_gfsecpar quicksilver_const_secpar_bits(const quick
 extern inline quicksilver_vec_gfsecpar quicksilver_get_witness_8_bits(const quicksilver_state* state, size_t bit_index);
 extern inline void quicksilver_constraint(quicksilver_state* state, quicksilver_vec_deg2 x);
 extern inline void quicksilver_inverse_constraint(quicksilver_state* state, quicksilver_vec_gfsecpar x, quicksilver_vec_gfsecpar y);
+// extern inline void quicksilver_mersenne_inverse_constraint(quicksilver_state* state, quicksilver_vec_gfsecpar x, quicksilver_vec_gfsecpar y, int e);

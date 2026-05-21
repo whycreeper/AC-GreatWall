@@ -4,13 +4,166 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
-
+#include <string.h>
 #include "config.h"
 
 typedef struct
 {
 	uint64_t data[3];
+} block137;
+
+typedef struct
+{
+	uint64_t data[3];
 } block192;
+
+typedef struct
+{
+	uint64_t data[4];
+} block193;
+
+typedef struct
+{
+	uint64_t data[5];
+} block257;
+
+static inline void block137_canonicalize(block137* a) {
+    a->data[2] &= 0x1FFULL;
+}
+
+static inline void block137_load_to_block(block137* out, const uint8_t* in)
+{
+	assert((in[17] & 0xFE) == 0);
+    memset(out, 0, sizeof(*out));
+    memcpy(out, in, 18);
+    out->data[2] &= 0x1FFULL;
+}
+
+static inline void block137_load_words(block137* out, const uint64_t in[3])
+{
+    out->data[0] = in[0];
+    out->data[1] = in[1];
+    out->data[2] = in[2] & 0x1FFULL;
+
+    assert((in[2] & ~0x1FFULL) == 0);
+}
+
+static inline bool block137_is_canonical(const block137* in)
+{
+    return (in->data[2] & ~0x1FFULL) == 0;
+}
+
+static inline void block137_store_from_block(uint8_t* out, const block137* in)
+{
+	assert(block137_is_canonical(in));
+	memcpy(out, in, 18);
+}
+inline block137 block137_xor(block137 x, block137 y)
+{
+	// Plain c version for now at least. Hopefully it will be autovectorized.
+	block137 out;
+	out.data[0] = x.data[0] ^ y.data[0];
+	out.data[1] = x.data[1] ^ y.data[1];
+	out.data[2] = x.data[2] ^ y.data[2];
+	return out;
+}
+
+
+static inline void block193_canonicalize(block193* a) {
+    a->data[3] &= 0x1ULL;
+}
+
+static inline bool block193_is_canonical(const block193* in)
+{
+    return (in->data[3] & ~0x1ULL) == 0;
+}
+
+static inline void block193_load_to_block(block193* out, const uint8_t* in)
+{
+    assert((in[24] & 0xFE) == 0);
+    memset(out, 0, sizeof(*out));
+    memcpy(out, in, 25);
+    out->data[3] &= 0x1ULL;
+}
+
+static inline void block193_load_words(block193* out, const uint64_t in[4])
+{
+    out->data[0] = in[0];
+    out->data[1] = in[1];
+    out->data[2] = in[2];
+    out->data[3] = in[3] & 0x1ULL;
+
+    assert((in[3] & ~0x1ULL) == 0);
+}
+
+static inline void block193_store_from_block(uint8_t* out, const block193* in)
+{
+    assert(block193_is_canonical(in));
+    memcpy(out, in, 25);
+}
+
+static inline block193 block193_xor(block193 x, block193 y)
+{
+    block193 out;
+    out.data[0] = x.data[0] ^ y.data[0];
+    out.data[1] = x.data[1] ^ y.data[1];
+    out.data[2] = x.data[2] ^ y.data[2];
+    out.data[3] = (x.data[3] ^ y.data[3]) & 0x1ULL;
+    return out;
+}
+
+static inline void block257_canonicalize(block257* a) {
+    a->data[4] &= 0x1ULL;
+}
+
+static inline bool block257_is_canonical(const block257* in)
+{
+    return (in->data[4] & ~0x1ULL) == 0;
+}
+
+static inline void block257_load_to_block(block257* out, const uint8_t* in)
+{
+    // 257 bit = 32 bytes + 1 bit
+    assert((in[32] & 0xFE) == 0);
+
+    memset(out, 0, sizeof(*out));
+    memcpy(out, in, 33);
+
+    out->data[4] &= 0x1ULL;
+}
+
+static inline void block257_load_words(block257* out, const uint64_t in[5])
+{
+    out->data[0] = in[0];
+    out->data[1] = in[1];
+    out->data[2] = in[2];
+    out->data[3] = in[3];
+    out->data[4] = in[4] & 0x1ULL;
+
+    assert((in[4] & ~0x1ULL) == 0);
+}
+
+static inline void block257_store_from_block(uint8_t* out, const block257* in)
+{
+    assert(block257_is_canonical(in));
+
+    memcpy(out, in, 33);
+
+    out[32] &= 0x01;
+}
+
+static inline block257 block257_xor(block257 x, block257 y)
+{
+    block257 out;
+
+    out.data[0] = x.data[0] ^ y.data[0];
+    out.data[1] = x.data[1] ^ y.data[1];
+    out.data[2] = x.data[2] ^ y.data[2];
+    out.data[3] = x.data[3] ^ y.data[3];
+    out.data[4] = (x.data[4] ^ y.data[4]) & 0x1ULL;
+
+    return out;
+}
 
 inline block192 block192_xor(block192 x, block192 y)
 {

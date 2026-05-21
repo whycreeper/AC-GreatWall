@@ -9,29 +9,42 @@
 #include "vector_com.h"
 #include "vole_commit.h"
 
-#if defined(OWF_AES_CTR)
-#define FAEST_IV_BYTES (OWF_BLOCKS * OWF_BLOCK_SIZE)
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-#define FAEST_IV_BYTES (SECURITY_PARAM / 8)
-#elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
-#define FAEST_IV_BYTES (SECURITY_PARAM / 8)
-#elif defined(OWF_MQ_2_1)
-#define FAEST_IV_BYTES (SECURITY_PARAM / 8)
-#elif defined(OWF_MQ_2_8)
-#define FAEST_IV_BYTES (SECURITY_PARAM / 8)
+// #if defined(OWF_AES_CTR)
+// #define FAEST_IV_BYTES (OWF_BLOCKS * OWF_BLOCK_SIZE)
+// #elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
+// #define FAEST_IV_BYTES (SECURITY_PARAM / 8)
+// #elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
+// #define FAEST_IV_BYTES (SECURITY_PARAM / 8)
+// #elif defined(OWF_GREATWALL)
+#define FAEST_IV_BYTES 0
+// #elif defined(OWF_MQ_2_1)
+// #define FAEST_IV_BYTES (SECURITY_PARAM / 8)
+// #elif defined(OWF_MQ_2_8)
+// #define FAEST_IV_BYTES (SECURITY_PARAM / 8)
+// #endif
+
+#if SECURITY_PARAM == 128
+#define GREATWALL_SECRET_KEY_BITS 137
+#elif SECURITY_PARAM == 192
+#define GREATWALL_SECRET_KEY_BITS 193
+#elif SECURITY_PARAM == 256
+#define GREATWALL_SECRET_KEY_BITS 257
+// #elif defined(OWF_GREATWALL) && SECURITY_PARAM == 384
+// #define GREATWALL_SECRET_KEY_BITS 389
+// #elif defined(OWF_GREATWALL) && SECURITY_PARAM == 512
+// #define GREATWALL_SECRET_KEY_BITS 521
 #endif
 
-#if defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-#define FAEST_SECRET_KEY_BYTES ((MQ_M*MQ_GF_BITS)/8 + FAEST_IV_BYTES)		// MQ_M is set to be divisuble by 8
-#else
-#define FAEST_SECRET_KEY_BYTES ((SECURITY_PARAM / 8) + FAEST_IV_BYTES)
-#endif
+// #if defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
+// #define FAEST_SECRET_KEY_BYTES ((MQ_M*MQ_GF_BITS)/8 + FAEST_IV_BYTES)
+// #elif defined(OWF_GREATWALL)
+#define GREATWALL_SECRET_KEY_BYTES (((GREATWALL_SECRET_KEY_BITS + 7) / 8) + FAEST_IV_BYTES)
+// #else
+// #define FAEST_SECRET_KEY_BYTES ((SECURITY_PARAM / 8) + FAEST_IV_BYTES)
+// #endif
 
-#if defined(OWF_AES_CTR) && SECURITY_PARAM == 192
-#define FAEST_PUBLIC_KEY_BYTES (32 + FAEST_IV_BYTES)
-#else
-#define FAEST_PUBLIC_KEY_BYTES FAEST_SECRET_KEY_BYTES
-#endif
+
+#define GREATWALL_PUBLIC_KEY_BYTES GREATWALL_SECRET_KEY_BYTES
 
 #if USE_IMPROVED_VECTOR_COMMITMENTS == 0 && ZERO_BITS_IN_CHALLENGE_3 == 0
 	#define COUNTER_BYTES 0

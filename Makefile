@@ -27,15 +27,15 @@ archs = avx2
 taus_128 = 11 16
 taus_192 = 16 24
 taus_256 = 22 32
-seeds_thresholds_128 = pprf 98 # If pprf, use old non-batch vector commitments.
+seeds_thresholds_128 = pprf 98 100# If pprf, use old non-batch vector commitments.
 seeds_thresholds_192 = pprf 147
 seeds_thresholds_256 = pprf 196
-owfs = c e r3 r4 mq1 mq8
+owfs = c e r3 r4 mq1 mq8 gw
 prgs = c
 tree_prgs = c
 leaf_prgs = c s
 
-zero_bit_counts = 0 6
+zero_bit_counts = 0 6 7
 
 default_settings := \
 	$(foreach security_param,$(security_params),\

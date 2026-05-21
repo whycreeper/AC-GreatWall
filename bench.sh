@@ -3,9 +3,9 @@
 set -euo pipefail
 # set -euxo pipefail
 
-FAEST="sec128_cccs_16_avx2"
-# FAEST_128S="sec128_cccs_11_avx2"
-# FAEST_128F="sec128_cccs_16_avx2"
+# FAEST="sec128_cccs_16_avx2"
+# FAESTER_128S="sec128_cccs_11_7_102_avx2"
+# FAEST_128F="sec128_cccs_16_0_98_avx2"
 # FAEST_192S="sec192_cccs_16_avx2"
 # FAEST_192F="sec192_cccs_24_avx2"
 # FAEST_256S="sec256_cccs_22_avx2"
@@ -16,9 +16,30 @@ FAEST="sec128_cccs_16_avx2"
 # FAEST_EM_192F="sec192_eccs_24_avx2"
 # FAEST_EM_256S="sec256_eccs_22_avx2"
 # FAEST_EM_256F="sec256_eccs_32_avx2"
+FAESTER_128S="sec128_cccs_11_7_102_avx2"
+FAESTER_128F="sec128_cccs_16_8_110_avx2"
+FAESTER_192S="sec192_cccs_16_12_162_avx2"
+FAESTER_192F="sec192_cccs_24_8_163_avx2"
+FAESTER_256S="sec256_cccs_22_6_245_avx2"
+FAESTER_256F="sec256_cccs_32_8_246_avx2"
 
-ALL="FAEST FAEST_128S FAEST_128F FAEST_192S FAEST_192F FAEST_256S FAEST_256F FAEST_EM_128S FAEST_EM_128F FAEST_EM_192S FAEST_EM_192F FAEST_EM_256S FAEST_EM_256F"
+RAIN3_128S="sec128_r3ccs_11_7_100_avx2"
+RAIN3_192S="sec192_r3ccs_16_8_183_avx2"
+RAIN3_256S="sec256_r3ccs_22_6_246_avx2"
+RAIN3_128F="sec128_r3ccs_16_8_108_avx2"
+RAIN3_192F="sec192_r3ccs_24_8_184_avx2"
+RAIN3_256F="sec256_r3ccs_32_7_248_avx2"
 
+GW_128S="sec128_gwccs_11_7_100_avx2"
+GW_192S="sec192_gwccs_16_8_183_avx2"
+GW_256S="sec256_gwccs_22_6_246_avx2"
+GW_128F="sec128_gwccs_16_8_108_avx2"
+GW_192F="sec192_gwccs_24_8_184_avx2"
+GW_256F="sec256_gwccs_32_7_248_avx2"
+
+# ALL="FAEST FAEST_128S FAEST_128F FAEST_192S FAEST_192F FAEST_256S FAEST_256F FAEST_EM_128S FAEST_EM_128F FAEST_EM_192S FAEST_EM_192F FAEST_EM_256S FAEST_EM_256F"
+ALL=" GW_128S GW_192S GW_256S GW_128F GW_192F GW_256F"
+# ALL="FAESTER_128S FAESTER_128F FAESTER_192S FAESTER_192F FAESTER_256S FAESTER_256F RAIN3_128S RAIN3_192S RAIN3_256S RAIN3_128F RAIN3_192F RAIN3_256F GW_128S GW_192S GW_256S GW_128F GW_192F GW_256F"
 clean () {
     make clean
 }
@@ -104,10 +125,16 @@ run_bench () {
     name="$1"
     setting_id="$2"
     echo "# Benching: ${name} (${setting_id})" >&2
+    echo "===== BENCH OUT =====" >&2
 
     meta="`gather_metadata`"
+    echo "===== meta =====" >&2
 
     bench_out="`"./Additional_Implementations/${setting_id}/${setting_id}_test" '[bench]'`"
+
+    echo "===== BENCH OUT START =====" >&2
+    echo "$bench_out" >&2
+    echo "===== BENCH OUT END =====" >&2
 
     bench_keygen_out="`echo "${bench_out}" | grep -P '^keygen' -A 2`"
     bench_sign_out="`echo "${bench_out}" | grep -P '^sign' -A 2`"
