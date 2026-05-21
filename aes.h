@@ -7,10 +7,13 @@
 
 #include "block.h"
 #if SECURITY_PARAM == 128
+#define AES_KEY_BITS 128
 #define AES_ROUNDS 10
 #elif SECURITY_PARAM == 192
+#define AES_KEY_BITS 192
 #define AES_ROUNDS 12
-#elif SECURITY_PARAM == 256
+#elif SECURITY_PARAM >= 256
+#define AES_KEY_BITS 256
 #define AES_ROUNDS 14
 #endif
 

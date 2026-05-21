@@ -13,6 +13,7 @@ owfs = {
     'r4': 'RAIN_4',
     'mq1': 'MQ_2_1',
     'mq8': 'MQ_2_8',
+    'gw': 'GREATWALL',
 }
 
 def parse_cipher_abbreviation(ciphers, table):

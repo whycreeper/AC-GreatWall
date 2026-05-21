@@ -2,533 +2,1326 @@
 
 #include "aes.h"
 #include "rain.h"
+#include "greatwall.h"
 #include "mq.h"
 #include "faest_details.h"
 #include "owf_proof.h"
 #include "quicksilver.h"
+#include <stdio.h>
+#include <string.h>
+
+static void debug_print_bytes(const char* tag, const void* data, size_t len)
+{
+    const unsigned char* p = (const unsigned char*)data;
+    printf("%s = ", tag);
+    for (size_t i = 0; i < len; ++i) {
+        printf("%02x", p[i]);
+    }
+    printf("\n");
+}
+
+static void debug_print_poly_secpar(const char* tag, poly_secpar_vec x)
+{
+    debug_print_bytes(tag, &x, sizeof(x));
+}
+
+static void debug_print_vec_gfsecpar(const char* tag, quicksilver_vec_gfsecpar x, bool verifier)
+{
+    char buf[128];
+
+    if (!verifier) {
+        snprintf(buf, sizeof(buf), "%s.value", tag);
+        debug_print_poly_secpar(buf, x.value);
+    }
+
+    snprintf(buf, sizeof(buf), "%s.mac", tag);
+    debug_print_poly_secpar(buf, x.mac);
+}
+
+static int debug_poly_secpar_eq(poly_secpar_vec a, poly_secpar_vec b)
+{
+    return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
 
 #define NUM_COLS (OWF_BLOCK_SIZE / 4)
 #define N_WD (SECURITY_PARAM / 32)
 // NEW
-#if defined(OWF_AES_CTR) || defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-    #define S_ENC (OWF_BLOCK_SIZE * OWF_ROUNDS)
-#elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
     #define S_ENC OWF_ROUNDS
+
+static inline void gf137_shift_reduce(
+    qs_gf137_bits* out,
+    const qs_gf137_bits* y,
+    size_t shift,
+    quicksilver_state* state)
+{
+    quicksilver_vec_gf2 tmp[273];
+
+    for (size_t i = 0; i < 273; ++i) {
+        tmp[i] = quicksilver_zero_gf2();
+    }
+
+    for (size_t j = 0; j < 137; ++j) {
+        tmp[j + shift] =
+            quicksilver_add_gf2(
+                state,
+                tmp[j + shift],
+                y->bit[j]
+            );
+    }
+
+    // poly: x^137 + x^21 + 1
+
+    for (int pos = 272; pos >= 137; --pos) {
+        quicksilver_vec_gf2 t = tmp[pos];
+
+        tmp[pos] = quicksilver_zero_gf2(state);
+
+        // X^pos → X^{pos-137+21} + X^{pos-137}
+        tmp[pos - 137 + 21] =
+            quicksilver_add_gf2(state, tmp[pos - 137 + 21], t);
+
+        tmp[pos - 137] =
+            quicksilver_add_gf2(state, tmp[pos - 137], t);
+    }
+
+    for (size_t i = 0; i < 137; ++i) {
+        out->bit[i] = tmp[i];
+    }
+}
+
+static inline void gf193_shift_reduce(
+    qs_gf193_bits* out,
+    const qs_gf193_bits* y,
+    size_t shift,
+    quicksilver_state* state)
+{
+    quicksilver_vec_gf2 tmp[385];
+
+    for (size_t i = 0; i < 385; ++i) {
+        tmp[i] = quicksilver_zero_gf2();
+    }
+
+    for (size_t j = 0; j < 193; ++j) {
+        tmp[j + shift] =
+            quicksilver_add_gf2(
+                state,
+                tmp[j + shift],
+                y->bit[j]
+            );
+    }
+
+    // poly: x^193 + x^15 + 1
+    for (int pos = 384; pos >= 193; --pos) {
+        quicksilver_vec_gf2 t = tmp[pos];
+
+        tmp[pos] = quicksilver_zero_gf2();
+
+        // X^pos -> X^{pos-193+15} + X^{pos-193}
+        tmp[pos - 193 + 15] =
+            quicksilver_add_gf2(state, tmp[pos - 193 + 15], t);
+
+        tmp[pos - 193] =
+            quicksilver_add_gf2(state, tmp[pos - 193], t);
+    }
+
+    for (size_t i = 0; i < 193; ++i) {
+        out->bit[i] = tmp[i];
+    }
+}
+
+static inline void gf257_shift_reduce(
+    qs_gf257_bits* out,
+    const qs_gf257_bits* y,
+    size_t shift,
+    quicksilver_state* state)
+{
+    quicksilver_vec_gf2 tmp[513];
+
+    for (size_t i = 0; i < 513; ++i) {
+        tmp[i] = quicksilver_zero_gf2();
+    }
+
+    for (size_t j = 0; j < 257; ++j) {
+        tmp[j + shift] =
+            quicksilver_add_gf2(
+                state,
+                tmp[j + shift],
+                y->bit[j]
+            );
+    }
+
+    // poly: x^257 + x^12 + 1
+    for (int pos = 512; pos >= 257; --pos) {
+        quicksilver_vec_gf2 t = tmp[pos];
+
+        tmp[pos] = quicksilver_zero_gf2();
+
+        // X^pos -> X^{pos-257+a} + X^{pos-257}
+        tmp[pos - 257 + 12] =
+            quicksilver_add_gf2(
+                state,
+                tmp[pos - 257 + 12],
+                t
+            );
+
+        tmp[pos - 257] =
+            quicksilver_add_gf2(
+                state,
+                tmp[pos - 257],
+                t
+            );
+    }
+
+    for (size_t i = 0; i < 257; ++i) {
+        out->bit[i] = tmp[i];
+    }
+}
+
+static void qs_gf137_mul_constraint(
+    quicksilver_state* state,
+    const qs_gf137_bits* x,
+    const qs_gf137_bits* y,
+    const qs_gf137_bits* z)
+{
+    quicksilver_vec_deg2 acc_lo = quicksilver_zero_deg2();
+    quicksilver_vec_deg2 acc_hi = quicksilver_zero_deg2();
+
+    for (size_t i = 0; i < 137; ++i) {
+
+        quicksilver_vec_gf2 xi = x->bit[i];
+        quicksilver_vec_gfsecpar Xi = quicksilver_combine_1_bit(state, xi);
+
+        qs_gf137_bits Li_bits;
+        gf137_shift_reduce(&Li_bits, y, i, state);
+
+        quicksilver_vec_gfsecpar Li_lo = quicksilver_combine_secpar_bits(state, Li_bits.bit);
+        quicksilver_vec_gfsecpar Li_hi = quicksilver_combine_secpar_bits_not_full(state, Li_bits.bit + 128);
+
+        acc_lo = quicksilver_add_deg2(
+            state,
+            acc_lo,
+            quicksilver_mul(state, Xi, Li_lo)
+        );
+
+        acc_hi = quicksilver_add_deg2(
+            state,
+            acc_hi,
+            quicksilver_mul(state, Xi, Li_hi)
+        );
+    }
+
+    quicksilver_vec_gfsecpar z_lo = quicksilver_combine_secpar_bits(state, z->bit);
+    quicksilver_vec_gfsecpar z_hi = quicksilver_combine_secpar_bits_not_full(state, z->bit + 128);
+
+    acc_lo = quicksilver_add_deg2(
+        state,
+        acc_lo,
+        quicksilver_mul(state, z_lo, quicksilver_one_gfsecpar(state))
+    );
+
+    acc_hi = quicksilver_add_deg2(
+        state,
+        acc_hi,
+        quicksilver_mul(state, z_hi, quicksilver_one_gfsecpar(state))
+    );
+
+    quicksilver_constraint(state, acc_lo);
+    quicksilver_constraint(state, acc_hi);
+}
+
+static void qs_gf193_mul_constraint(
+    quicksilver_state* state,
+    const qs_gf193_bits* x,
+    const qs_gf193_bits* y,
+    const qs_gf193_bits* z)
+{
+    quicksilver_vec_deg2 acc_lo = quicksilver_zero_deg2();
+    quicksilver_vec_deg2 acc_hi = quicksilver_zero_deg2();
+
+    for (size_t i = 0; i < 193; ++i) {
+        quicksilver_vec_gf2 xi = x->bit[i];
+        quicksilver_vec_gfsecpar Xi =
+            quicksilver_combine_1_bit(state, xi);
+
+        qs_gf193_bits Li_bits;
+        gf193_shift_reduce(&Li_bits, y, i, state);
+
+        quicksilver_vec_gfsecpar Li_lo =
+            quicksilver_combine_secpar_bits(state, Li_bits.bit); // 0..191
+
+        quicksilver_vec_gfsecpar Li_hi =
+            quicksilver_combine_1_bit(state, Li_bits.bit[192]);  // bit 192
+
+        acc_lo = quicksilver_add_deg2(
+            state,
+            acc_lo,
+            quicksilver_mul(state, Xi, Li_lo)
+        );
+
+        acc_hi = quicksilver_add_deg2(
+            state,
+            acc_hi,
+            quicksilver_mul(state, Xi, Li_hi)
+        );
+    }
+
+    quicksilver_vec_gfsecpar z_lo =
+        quicksilver_combine_secpar_bits(state, z->bit); // 0..191
+
+    quicksilver_vec_gfsecpar z_hi =
+        quicksilver_combine_1_bit(state, z->bit[192]);  // bit 192
+
+    acc_lo = quicksilver_add_deg2(
+        state,
+        acc_lo,
+        quicksilver_mul(state, z_lo, quicksilver_one_gfsecpar(state))
+    );
+
+    acc_hi = quicksilver_add_deg2(
+        state,
+        acc_hi,
+        quicksilver_mul(state, z_hi, quicksilver_one_gfsecpar(state))
+    );
+
+    quicksilver_constraint(state, acc_lo);
+    quicksilver_constraint(state, acc_hi);
+}
+
+static void qs_gf257_mul_constraint(
+    quicksilver_state* state,
+    const qs_gf257_bits* x,
+    const qs_gf257_bits* y,
+    const qs_gf257_bits* z)
+{
+    quicksilver_vec_deg2 acc_lo = quicksilver_zero_deg2();
+    quicksilver_vec_deg2 acc_hi = quicksilver_zero_deg2();
+
+    for (size_t i = 0; i < 257; ++i) {
+        quicksilver_vec_gf2 xi = x->bit[i];
+
+        quicksilver_vec_gfsecpar Xi =
+            quicksilver_combine_1_bit(state, xi);
+
+        qs_gf257_bits Li_bits;
+        gf257_shift_reduce(&Li_bits, y, i, state);
+
+        quicksilver_vec_gfsecpar Li_lo =
+            quicksilver_combine_secpar_bits(state, Li_bits.bit);
+
+        quicksilver_vec_gfsecpar Li_hi =
+            quicksilver_combine_1_bit(state, Li_bits.bit[256]);
+
+        acc_lo = quicksilver_add_deg2(
+            state,
+            acc_lo,
+            quicksilver_mul(state, Xi, Li_lo)
+        );
+
+        acc_hi = quicksilver_add_deg2(
+            state,
+            acc_hi,
+            quicksilver_mul(state, Xi, Li_hi)
+        );
+    }
+
+    quicksilver_vec_gfsecpar z_lo =
+        quicksilver_combine_secpar_bits(state, z->bit);
+
+    quicksilver_vec_gfsecpar z_hi =
+        quicksilver_combine_1_bit(state, z->bit[256]);
+
+    acc_lo = quicksilver_add_deg2(
+        state,
+        acc_lo,
+        quicksilver_mul(state, z_lo, quicksilver_one_gfsecpar(state))
+    );
+
+    acc_hi = quicksilver_add_deg2(
+        state,
+        acc_hi,
+        quicksilver_mul(state, z_hi, quicksilver_one_gfsecpar(state))
+    );
+
+    quicksilver_constraint(state, acc_lo);
+    quicksilver_constraint(state, acc_hi);
+}
+
+static ALWAYS_INLINE void load_rc137_bits(
+    quicksilver_state* state,
+    qs_gf137_bits* out,
+    const uint64_t rc_words[3])
+{
+    for (size_t i = 0; i < 137; ++i) {
+        uint8_t b = (rc_words[i >> 6] >> (i & 63)) & 1;
+
+        out->bit[i] = b
+            ? quicksilver_one_gf2(state)
+            : quicksilver_zero_gf2(state);
+    }
+}
+
+static ALWAYS_INLINE void load_rc193_bits(
+    quicksilver_state* state,
+    qs_gf193_bits* out,
+    const uint64_t rc_words[4])
+{
+    for (size_t i = 0; i < 193; ++i) {
+        uint8_t b = (rc_words[i >> 6] >> (i & 63)) & 1;
+
+        out->bit[i] = b
+            ? quicksilver_one_gf2(state)
+            : quicksilver_zero_gf2(state);
+    }
+}
+
+static ALWAYS_INLINE void load_rc257_bits(
+    quicksilver_state* state,
+    qs_gf257_bits* out,
+    const uint64_t rc_words[5])
+{
+    for (size_t i = 0; i < 257; ++i) {
+        uint8_t b = (rc_words[i >> 6] >> (i & 63)) & 1;
+
+        out->bit[i] = b
+            ? quicksilver_one_gf2(state)
+            : quicksilver_zero_gf2(state);
+    }
+}
+
+static ALWAYS_INLINE uint8_t mat137_get_bit(
+    const uint64_t matrix[137][3],
+    size_t row,
+    size_t col)
+{
+    uint64_t word = matrix[row][col >> 6];
+    return (uint8_t)((word >> (col & 63)) & 1ULL);
+}
+
+static ALWAYS_INLINE uint8_t mat193_get_bit(
+    const uint64_t matrix[193][4],
+    size_t row,
+    size_t col)
+{
+    uint64_t word = matrix[row][col >> 6];
+    return (uint8_t)((word >> (col & 63)) & 1ULL);
+}
+
+static ALWAYS_INLINE uint8_t mat257_get_bit(
+    const uint64_t matrix[257][5],
+    size_t row,
+    size_t col)
+{
+    uint64_t word = matrix[row][col >> 6];
+    return (uint8_t)((word >> (col & 63)) & 1ULL);
+}
+
+static inline void gf521_shift_reduce(
+    qs_gf521_bits* out,
+    const qs_gf521_bits* y,
+    size_t shift,
+    quicksilver_state* state)
+{
+    quicksilver_vec_gf2 tmp[1041];
+
+    for (size_t i = 0; i < 1041; ++i) {
+        tmp[i] = quicksilver_zero_gf2();
+    }
+
+    for (size_t j = 0; j < 521; ++j) {
+        tmp[j + shift] =
+            quicksilver_add_gf2(
+                state,
+                tmp[j + shift],
+                y->bit[j]
+            );
+    }
+
+    // poly: x^521 + x^32 + 1
+    for (int pos = 1040; pos >= 521; --pos) {
+        quicksilver_vec_gf2 t = tmp[pos];
+
+        tmp[pos] = quicksilver_zero_gf2();
+
+        // X^pos -> X^{pos-521+32} + X^{pos-521}
+        tmp[pos - 521 + 32] =
+            quicksilver_add_gf2(
+                state,
+                tmp[pos - 521 + 32],
+                t
+            );
+
+        tmp[pos - 521] =
+            quicksilver_add_gf2(
+                state,
+                tmp[pos - 521],
+                t
+            );
+    }
+
+    for (size_t i = 0; i < 521; ++i) {
+        out->bit[i] = tmp[i];
+    }
+}
+
+static void qs_gf521_mul_constraint(
+    quicksilver_state* state,
+    const qs_gf521_bits* x,
+    const qs_gf521_bits* y,
+    const qs_gf521_bits* z)
+{
+    quicksilver_vec_deg2 acc_lo = quicksilver_zero_deg2();
+    quicksilver_vec_deg2 acc_hi = quicksilver_zero_deg2();
+
+    for (size_t i = 0; i < 521; ++i) {
+        quicksilver_vec_gf2 xi = x->bit[i];
+
+        quicksilver_vec_gfsecpar Xi =
+            quicksilver_combine_1_bit(state, xi);
+
+        qs_gf521_bits Li_bits;
+        gf521_shift_reduce(&Li_bits, y, i, state);
+
+        /*
+         * SECURITY_PARAM == 512
+         * low part:  bits 0..511
+         * high part: bits 512..520, total 9 bits
+         */
+        quicksilver_vec_gfsecpar Li_lo =
+            quicksilver_combine_secpar_bits(state, Li_bits.bit);
+
+        quicksilver_vec_gfsecpar Li_hi =
+            quicksilver_combine_secpar_bits_not_full(
+                state,
+                Li_bits.bit + 512
+            );
+
+        acc_lo = quicksilver_add_deg2(
+            state,
+            acc_lo,
+            quicksilver_mul(state, Xi, Li_lo)
+        );
+
+        acc_hi = quicksilver_add_deg2(
+            state,
+            acc_hi,
+            quicksilver_mul(state, Xi, Li_hi)
+        );
+    }
+
+    quicksilver_vec_gfsecpar z_lo =
+        quicksilver_combine_secpar_bits(state, z->bit);
+
+    quicksilver_vec_gfsecpar z_hi =
+        quicksilver_combine_secpar_bits_not_full(
+            state,
+            z->bit + 512
+        );
+
+    acc_lo = quicksilver_add_deg2(
+        state,
+        acc_lo,
+        quicksilver_mul(state, z_lo, quicksilver_one_gfsecpar(state))
+    );
+
+    acc_hi = quicksilver_add_deg2(
+        state,
+        acc_hi,
+        quicksilver_mul(state, z_hi, quicksilver_one_gfsecpar(state))
+    );
+
+    quicksilver_constraint(state, acc_lo);
+    quicksilver_constraint(state, acc_hi);
+}
+
+static ALWAYS_INLINE void load_rc521_bits(
+    quicksilver_state* state,
+    qs_gf521_bits* out,
+    const uint64_t rc_words[9])
+{
+    for (size_t i = 0; i < 521; ++i) {
+        uint8_t b = (rc_words[i >> 6] >> (i & 63)) & 1;
+
+        out->bit[i] = b
+            ? quicksilver_one_gf2(state)
+            : quicksilver_zero_gf2(state);
+    }
+}
+
+static ALWAYS_INLINE uint8_t mat521_get_bit(
+    const uint64_t matrix[521][9],
+    size_t row,
+    size_t col)
+{
+    uint64_t word = matrix[row][col >> 6];
+    return (uint8_t)((word >> (col & 63)) & 1ULL);
+}
+#if SECURITY_PARAM == 512
+static uint8_t debug_qs_bit_value(quicksilver_vec_gf2 x)
+{
+    return memcmp(&x.value, &(poly1_vec){0}, sizeof(poly1_vec)) != 0;
+}
+
+static block521 debug_qs_gf521_to_block(const qs_gf521_bits* x)
+{
+    block521 r;
+    memset(&r, 0, sizeof(r));
+
+    for (size_t i = 0; i < 521; ++i) {
+        if (debug_qs_bit_value(x->bit[i])) {
+            r.data[i >> 6] ^= 1ULL << (i & 63);
+        }
+    }
+
+    r.data[8] &= 0x1FFULL;
+    return r;
+}
+
+static int debug_block521_eq(block521 a, block521 b)
+{
+    a.data[8] &= 0x1FFULL;
+    b.data[8] &= 0x1FFULL;
+    return memcmp(&a, &b, sizeof(block521)) == 0;
+}
+
+static void debug_print_block521(const char* tag, block521 x)
+{
+    x.data[8] &= 0x1FFULL;
+    printf("%s = ", tag);
+    for (int i = 8; i >= 0; --i) {
+        printf("%016" PRIx64, x.data[i]);
+    }
+    printf("\n");
+}
 #endif
+static ALWAYS_INLINE void enc_constraints(quicksilver_state* state, owf_block out) {
 
-#if defined(OWF_AES_CTR)
+#if SECURITY_PARAM == 128
 
-static ALWAYS_INLINE void key_sched_fwd(quicksilver_state* state, quicksilver_vec_gf2* output) {
-    for (size_t bit_i = 0; bit_i < SECURITY_PARAM; ++bit_i) {
-        output[bit_i] = quicksilver_get_witness_vec(state, bit_i);
-    }
-    // current index in the extended witness
-    size_t i_wd = SECURITY_PARAM;
-    for (size_t word_j = N_WD; word_j < 4 * (AES_ROUNDS + 1); ++word_j) {
-        if (word_j % N_WD == 0 || (N_WD > 6 && word_j % N_WD == 4)) {
-            for (size_t bit_i = 0; bit_i < 32; ++bit_i) {
-                output[32 * word_j + bit_i] = quicksilver_get_witness_vec(state, i_wd + bit_i);
-            }
-            i_wd += 32;
-        } else {
-            for (size_t bit_i = 0; bit_i < 32; ++bit_i) {
-                output[32 * word_j + bit_i] = quicksilver_add_gf2(state,
-                    output[32 * (word_j - N_WD) + bit_i], output[32 * (word_j - 1) + bit_i]);
-            }
+        qs_gf137_bits inv_inputs[S_ENC];
+        qs_gf137_bits inv_outputs[S_ENC];
+        qs_gf137_bits pow_outputs[S_ENC];
+
+
+        qs_gf137_bits sk_bits;
+        for (size_t bit_j = 0; bit_j < 137; ++bit_j){
+            sk_bits.bit[bit_j] = quicksilver_get_witness_vec(state, bit_j);
+            inv_outputs[0].bit[bit_j] = quicksilver_get_witness_vec(state, bit_j + 144);
         }
-    }
-}
 
-static ALWAYS_INLINE void key_sched_lift_round_key_bits(quicksilver_state* state,
-        const quicksilver_vec_gf2* round_key_bits, quicksilver_vec_gfsecpar* output) {
-    for (size_t byte_i = 0; byte_i < OWF_BLOCK_SIZE * (OWF_ROUNDS + 1); ++byte_i) {
-        output[byte_i] = quicksilver_combine_8_bits(state, &round_key_bits[8 * byte_i]);
-    }
-}
+        qs_gf137_bits rc0_bits, rc1_bits, rc2_bits;
 
-static ALWAYS_INLINE void key_sched_bkwd(quicksilver_state* state, const quicksilver_vec_gf2* round_key_bits,
-        quicksilver_vec_gfsecpar* output) {
-    size_t i_wd = 0; // bit index to the round key word we are currently handling
-    size_t i_rcon = 0; // round constant index
-    bool remove_rcon = true; // flag indicating if we need to remove the round constant from the
-                             // next word
-    const quicksilver_vec_gf2 qs_one = quicksilver_one_gf2(state);
-    for (size_t sbox_j = 0; sbox_j < OWF_KEY_SCHEDULE_CONSTRAINTS; ++sbox_j) {
-        // load the witness byte
-        quicksilver_vec_gf2 sbox_out[8];
-        for (size_t bit_i = 0; bit_i < 8; ++bit_i) {
-            sbox_out[bit_i] = quicksilver_get_witness_vec(state, SECURITY_PARAM + sbox_j * 8 + bit_i);
-            // remove the byte that was xored in
-            sbox_out[bit_i] = quicksilver_add_gf2(state, sbox_out[bit_i],
-                    round_key_bits[i_wd + 8 * (sbox_j % 4) + bit_i]);
-        }
-        // (possibly) remove the round constant
-        if (sbox_j % 4 == 0 && remove_rcon) {
-            // remove the round constant from the first byte of every word coming through the sboxes
-            for (size_t bit_i = 0; bit_i < 8; ++bit_i) {
-                if ((aes_round_constants[i_rcon] >> bit_i) & 1) {
-                    sbox_out[bit_i] = quicksilver_add_gf2(state, sbox_out[bit_i], qs_one);
+        load_rc137_bits(state, &rc0_bits, greatwall_rc_137[0]);
+        load_rc137_bits(state, &rc1_bits, greatwall_rc_137[1]);
+        load_rc137_bits(state, &rc2_bits, greatwall_rc_137[2]);
+
+        qs_gf137_bits matrix0_output, matrix1_output, matrix2_output;
+        for (size_t matrow = 0; matrow < 137; matrow++) {
+            matrix0_output.bit[matrow] = quicksilver_zero_gf2();
+            for (size_t matcol = 0; matcol < 137; matcol++) {
+                uint8_t bit = mat137_get_bit(greatwall_mat_137_0, matrow, matcol);
+                if (bit) {
+                    matrix0_output.bit[matrow] = quicksilver_add_gf2(state, matrix0_output.bit[matrow], sk_bits.bit[matcol]);
                 }
             }
-            ++i_rcon;
         }
 
-        quicksilver_vec_gf2 inv_out[8];
-        for (size_t i = 0; i < 8; ++i)
-            inv_out[(i + 1) % 8] = sbox_out[i];
-        for (size_t i = 0; i < 8; ++i)
-            inv_out[(i + 3) % 8] = quicksilver_add_gf2(state, inv_out[(i + 3) % 8], sbox_out[i]);
-        for (size_t i = 0; i < 8; ++i)
-            inv_out[(i + 6) % 8] = quicksilver_add_gf2(state, inv_out[(i + 6) % 8], sbox_out[i]);
-        inv_out[0] = quicksilver_add_gf2(state, inv_out[0], qs_one);
-        inv_out[2] = quicksilver_add_gf2(state, inv_out[2], qs_one);
+        for (size_t i = 0; i < 137; ++i) {
+            inv_inputs[0].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix0_output.bit[i],
+                    rc0_bits.bit[i]
+                );
+        }
 
-        // lift into a field element and store in the output buffer
-        output[sbox_j] = quicksilver_combine_8_bits(state, inv_out);
-
-        if (sbox_j % 4 == 3) {
-            // increase i_wd to point to the next word
-            if (SECURITY_PARAM == 192) {
-                i_wd += 192;
-            } else {
-                i_wd += 128;
-                if (SECURITY_PARAM == 256) {
-                    remove_rcon = !remove_rcon;
+        for (size_t matrow = 0; matrow < 137; matrow++) {
+            pow_outputs[0].bit[matrow] = quicksilver_zero_gf2();
+            for (size_t matcol = 0; matcol < 137; matcol++) {
+                uint8_t bit = mat137_get_bit(greatwall_pow_mat_137_70, matrow, matcol);
+                if (bit) {
+                    pow_outputs[0].bit[matrow] = quicksilver_add_gf2(state, pow_outputs[0].bit[matrow], inv_outputs[0].bit[matcol]);
                 }
             }
         }
-    }
-}
 
-static ALWAYS_INLINE void key_sched_constraints(quicksilver_state* state, quicksilver_vec_gf2* round_key_bits,
-        quicksilver_vec_gfsecpar* round_key_bytes) {
-    quicksilver_vec_gfsecpar key_schedule_inv_outs[OWF_KEY_SCHEDULE_CONSTRAINTS];
-    key_sched_fwd(state, round_key_bits);
-    key_sched_bkwd(state, round_key_bits, key_schedule_inv_outs);
-    key_sched_lift_round_key_bits(state, round_key_bits, round_key_bytes);
+        qs_gf137_bits tmp;
 
-    // byte index of the current word to read from the round keys
-    size_t i_wd = 4 * (N_WD - 1);
-    // for 256 bit we only rotate every second time
-    bool rotate_word = true;
-    quicksilver_vec_gfsecpar lhss[4];
-    quicksilver_vec_gfsecpar rhss[4];
-    for (size_t sboxwd_j = 0; sboxwd_j < OWF_KEY_SCHEDULE_CONSTRAINTS / 4; ++sboxwd_j) {
-        if (rotate_word) {
-            for (size_t row_k = 0; row_k < 4; ++row_k) {
-                lhss[(row_k + 3) % 4] = round_key_bytes[i_wd + row_k];
-                rhss[row_k] = key_schedule_inv_outs[4 * sboxwd_j + row_k];
-            }
-        } else {
-            for (size_t row_k = 0; row_k < 4; ++row_k) {
-                lhss[row_k] = round_key_bytes[i_wd + row_k];
-                rhss[row_k] = key_schedule_inv_outs[4 * sboxwd_j + row_k];
-            }
+        for (size_t i = 0; i < 137; ++i) {
+            tmp.bit[i] = quicksilver_add_gf2(
+                    state,
+                    inv_outputs[0].bit[i],
+                    sk_bits.bit[i]
+                );
         }
-        for (size_t row_k = 0; row_k < 4; ++row_k) {
-            quicksilver_inverse_constraint(state, lhss[row_k], rhss[row_k]);
-        }
-        // increase i_wd to point to the next word
-        if (SECURITY_PARAM == 192) {
-            i_wd += 24;
-        } else {
-            i_wd += 16;
-            if (SECURITY_PARAM == 256) {
-                rotate_word = !rotate_word;
-            }
-        }
-    }
-}
 
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-
-// load the round keys into quicksilver values and "bake" EM secret key into the first round key
-static ALWAYS_INLINE void load_fixed_round_key(quicksilver_state* state, quicksilver_vec_gf2* round_key_bits,
-        quicksilver_vec_gfsecpar* round_key_bytes, const rijndael_round_keys* fixed_key) {
-    const uint8_t* rk_bytes = (const uint8_t*) fixed_key;
-
-    for (size_t byte_j = 0; byte_j < OWF_BLOCK_SIZE; ++byte_j) {
-        for (size_t bit_i = 0; bit_i < 8; ++bit_i) {
-            round_key_bits[8 * byte_j + bit_i] = quicksilver_add_gf2(state,
-                    quicksilver_const_gf2(state, poly1_load(rk_bytes[byte_j], bit_i)),
-                    quicksilver_get_witness_vec(state, 8 * byte_j + bit_i));
-        }
-        round_key_bytes[byte_j] = quicksilver_combine_8_bits(state, &round_key_bits[8 * byte_j]);
-    }
-
-    for (size_t byte_j = OWF_BLOCK_SIZE; byte_j < OWF_BLOCK_SIZE * (OWF_ROUNDS + 1); ++byte_j) {
-        for (size_t bit_i = 0; bit_i < 8; ++bit_i) {
-            round_key_bits[8 * byte_j + bit_i] = quicksilver_const_gf2(state, poly1_load(rk_bytes[byte_j], bit_i));
-        }
-        round_key_bytes[byte_j] = quicksilver_combine_8_bits(state, &round_key_bits[8 * byte_j]);
-    }
-}
-#endif
-
-#if defined(OWF_AES_CTR) || defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-static ALWAYS_INLINE void enc_fwd(quicksilver_state* state, const quicksilver_vec_gfsecpar* round_key_bytes, size_t witness_bit_offset, owf_block in,
-    quicksilver_vec_gfsecpar* output) {
-    const uint8_t* in_bytes = (uint8_t*)&in;
-
-    // first round: only add the round key
-    for (size_t byte_i = 0; byte_i < OWF_BLOCK_SIZE; ++byte_i) {
-        quicksilver_vec_gfsecpar input_byte = quicksilver_const_8_bits(state, &in_bytes[byte_i]);
-        output[byte_i] = quicksilver_add_gfsecpar(state, input_byte, round_key_bytes[byte_i]);
-    }
-
-    const poly_secpar_vec c_two = poly_secpar_from_byte(0x02);
-    const poly_secpar_vec c_three = poly_secpar_from_byte(0x03);
-
-    size_t round_key_byte_offset = OWF_BLOCK_SIZE;
-    size_t output_byte_offset = OWF_BLOCK_SIZE;
-    for (size_t round_i = 1; round_i < OWF_ROUNDS; ++round_i) {
-        for (size_t col_j = 0; col_j < NUM_COLS; ++col_j) {
-            quicksilver_vec_gfsecpar col_wit_bytes[4];
-            for (size_t row_k = 0; row_k < 4; ++row_k) {
-                col_wit_bytes[row_k] = quicksilver_get_witness_8_bits(state, witness_bit_offset + row_k * 8);
-            }
-            for (size_t row_k = 0; row_k < 4; ++row_k) {
-                output[output_byte_offset + row_k] =
-                    quicksilver_add_gfsecpar(state,
-                        quicksilver_mul_const(state, col_wit_bytes[row_k], c_two),
-                        quicksilver_add_gfsecpar(state,
-                            quicksilver_mul_const(state, col_wit_bytes[(row_k + 1) % 4], c_three),
-                            quicksilver_add_gfsecpar(state, col_wit_bytes[(row_k + 2) % 4],
-                                quicksilver_add_gfsecpar(state, col_wit_bytes[(row_k + 3) % 4],
-                                                         round_key_bytes[round_key_byte_offset + row_k]))));
-            }
-            witness_bit_offset += 32;
-            round_key_byte_offset += 4;
-            output_byte_offset += 4;
-        }
-   }
-}
-#endif
-
-#if defined(OWF_AES_CTR) || defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-static ALWAYS_INLINE void enc_bkwd(quicksilver_state* state, const quicksilver_vec_gf2* round_key_bits, size_t witness_bit_offset, owf_block out, quicksilver_vec_gfsecpar* output) {
-    const uint8_t* out_bytes = (uint8_t*)&out;
-    const size_t last_round_key_bit_offset = 8 * OWF_ROUNDS * OWF_BLOCK_SIZE;
-
-    for (size_t round_i = 0; round_i < OWF_ROUNDS; ++round_i, witness_bit_offset += OWF_BLOCK_SIZE * 8) {
-        for (size_t col_j = 0; col_j < NUM_COLS; ++col_j) {
-            for (size_t row_k = 0; row_k < 4; ++row_k) {
-                quicksilver_vec_gf2 witness_bits[8];
-#if OWF_BLOCK_SIZE == 32
-                size_t inv_shifted_index;
-                if (row_k >= 2) {
-                    inv_shifted_index = 4 * ((col_j + NUM_COLS - row_k - 1) % NUM_COLS) + row_k;
-                } else {
-                    inv_shifted_index = 4 * ((col_j + NUM_COLS - row_k) % NUM_COLS) + row_k;
+        for (size_t matrow = 0; matrow < 137; matrow++) {
+            matrix1_output.bit[matrow] = quicksilver_zero_gf2();
+            for (size_t matcol = 0; matcol < 137; matcol++) {
+                uint8_t bit = mat137_get_bit(greatwall_mat_137_1, matrow, matcol);
+                if (bit) {
+                    matrix1_output.bit[matrow] = quicksilver_add_gf2(state, matrix1_output.bit[matrow], tmp.bit[matcol]);
                 }
-#else
-                size_t inv_shifted_index = 4 * ((col_j + NUM_COLS - row_k) % NUM_COLS) + row_k;
-#endif
-                if (round_i < OWF_ROUNDS - 1) {
-                    // read witness bits directly
-                    for (size_t bit_i = 0; bit_i < 8; ++bit_i) {
-                        witness_bits[bit_i] = quicksilver_get_witness_vec(
-                                state, witness_bit_offset + 8 * inv_shifted_index + bit_i);
-                    }
-                } else {
-                    // compute witness bits from the last round key and the output
-                    for (size_t bit_i = 0; bit_i < 8; ++bit_i) {
-                        witness_bits[bit_i] = quicksilver_add_gf2(state,
-                                quicksilver_const_gf2(state, poly1_load(out_bytes[inv_shifted_index], bit_i)),
-                                round_key_bits[last_round_key_bit_offset + 8 * inv_shifted_index + bit_i]);
-#if defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-                        witness_bits[bit_i] = quicksilver_add_gf2(state, witness_bits[bit_i],
-                                quicksilver_get_witness_vec(state, 8 * inv_shifted_index + bit_i));
-#endif
-                    }
+            }
+        }
+
+        for (size_t i = 0; i < 137; ++i) {
+            inv_inputs[1].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix1_output.bit[i],
+                    rc1_bits.bit[i]
+                );
+        }
+
+        qs_gf137_bits out_bits;
+        for (size_t i = 0; i < 137; ++i) {
+            uint8_t b = (out.data[i >> 6] >> (i & 63)) & 1;
+
+            out_bits.bit[i] = b
+                ? quicksilver_one_gf2(state)
+                : quicksilver_zero_gf2();
+        }
+
+        for (size_t i = 0; i < 137; ++i) {
+            matrix2_output.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_inputs[1].bit[i],
+                    quicksilver_add_gf2(
+                        state,
+                        rc2_bits.bit[i],
+                        quicksilver_add_gf2(
+                            state,
+                            sk_bits.bit[i],
+                            out_bits.bit[i]
+                        )
+                    )
+                );
+        }
+
+        for (size_t matrow = 0; matrow < 137; matrow++) {
+            inv_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+            for (size_t matcol = 0; matcol < 137; matcol++) {
+                uint8_t bit = mat137_get_bit(greatwall_mat_137_2_inv, matrow, matcol);
+                if (bit) {
+                    inv_outputs[1].bit[matrow] = quicksilver_add_gf2(state, inv_outputs[1].bit[matrow], matrix2_output.bit[matcol]);
                 }
-
-                quicksilver_vec_gf2 qs_one = quicksilver_one_gf2(state);
-                quicksilver_vec_gf2 inv_out[8];
-                for (size_t i = 0; i < 8; ++i)
-                    inv_out[(i + 1) % 8] = witness_bits[i];
-                for (size_t i = 0; i < 8; ++i)
-                    inv_out[(i + 3) % 8] = quicksilver_add_gf2(state, inv_out[(i + 3) % 8], witness_bits[i]);
-                for (size_t i = 0; i < 8; ++i)
-                    inv_out[(i + 6) % 8] = quicksilver_add_gf2(state, inv_out[(i + 6) % 8], witness_bits[i]);
-                inv_out[0] = quicksilver_add_gf2(state, inv_out[0], qs_one);
-                inv_out[2] = quicksilver_add_gf2(state, inv_out[2], qs_one);
-
-                // lift into a field element and store in the output buffer
-                output[round_i * OWF_BLOCK_SIZE + 4 * col_j + row_k] = quicksilver_combine_8_bits(state, inv_out);
             }
         }
-    }
-}
-// NEW
-#elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
-static ALWAYS_INLINE void enc_fwd(quicksilver_state* state, size_t witness_bit_offset, owf_block in, quicksilver_vec_gfsecpar* output) {
-    const uint8_t* in_bytes = (uint8_t*)&in;
 
-    // first round: add the sk + rc
-    quicksilver_vec_gfsecpar input_bytes = quicksilver_const_secpar_bits(state, in_bytes);
-    #if SECURITY_PARAM == 128
-    quicksilver_vec_gf2 sk_bits[128];
-    for (size_t bit_j = 0; bit_j < 128; ++bit_j) {
-        sk_bits[bit_j] = quicksilver_get_witness_vec(state, bit_j);
-    }
-    quicksilver_vec_gfsecpar rc_bytes = quicksilver_const_secpar_bits(state, (uint8_t*)rain_rc_128);
-    #elif SECURITY_PARAM == 192
-    quicksilver_vec_gf2 sk_bits[192];
-    for (size_t bit_j = 0; bit_j < 192; ++bit_j) {
-        sk_bits[bit_j] = quicksilver_get_witness_vec(state, bit_j);
-    }
-    quicksilver_vec_gfsecpar rc_bytes = quicksilver_const_secpar_bits(state, (uint8_t*)rain_rc_192);
-    #elif SECURITY_PARAM == 256
-    quicksilver_vec_gf2 sk_bits[256];
-    for (size_t bit_j = 0; bit_j < 256; ++bit_j) {
-        sk_bits[bit_j] = quicksilver_get_witness_vec(state, bit_j);
-    }
-    quicksilver_vec_gfsecpar rc_bytes = quicksilver_const_secpar_bits(state, (uint8_t*)rain_rc_256);
-    #endif
-    quicksilver_vec_gfsecpar sk_bytes = quicksilver_combine_secpar_bits(state, sk_bits);
-
-    output[0] = quicksilver_add_gfsecpar(state, input_bytes, quicksilver_add_gfsecpar(state, rc_bytes, sk_bytes));
-
-    for (size_t round_i = 0; round_i < OWF_ROUNDS-1; ++round_i) {
-        // // MatMul,, hopefully this new place works!
-        quicksilver_vec_gfsecpar state_bytes;
-
-        #if SECURITY_PARAM == 128
-        quicksilver_vec_gf2 witness_bits[128];
-        for (size_t bit_j = 0; bit_j < 128; ++bit_j) {
-            witness_bits[bit_j] = quicksilver_get_witness_vec(state, (witness_bit_offset + round_i * 128) + bit_j);
-        }
-        quicksilver_vec_gf2 matmulres[128];
-        for (size_t matrow = 0; matrow < 128; matrow++) {
-            matmulres[matrow] = quicksilver_const_gf2(state, poly1_load(0, 0));
-            for (size_t matcol = 0; matcol < 128; matcol++) {
-                matmulres[matrow] = quicksilver_add_gf2(state,
-                matmulres[matrow],
-                quicksilver_mul_const_gf2(state, witness_bits[matcol], poly1_load(((uint8_t*)&rain_mat_128)[16*128*round_i + 16*matrow + matcol/8], matcol%8)));
+        for (size_t matrow = 0; matrow < 137; matrow++) {
+            pow_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+            for (size_t matcol = 0; matcol < 137; matcol++) {
+                uint8_t bit = mat137_get_bit(greatwall_pow_mat_137_75, matrow, matcol);
+                if (bit) {
+                    pow_outputs[1].bit[matrow] = quicksilver_add_gf2(state, pow_outputs[1].bit[matrow], inv_outputs[1].bit[matcol]);
+                }
             }
         }
-        memcpy(witness_bits, matmulres, sizeof(quicksilver_vec_gf2)*128);
-        rc_bytes = quicksilver_const_secpar_bits(state, (uint8_t*)&rain_rc_128[round_i+1]);
+        for(int i = 0; i < S_ENC; i++)qs_gf137_mul_constraint(state, &inv_inputs[i], &inv_outputs[i], &pow_outputs[i]);
 
-        #elif SECURITY_PARAM == 192
-        quicksilver_vec_gf2 witness_bits[192];
-        for (size_t bit_j = 0; bit_j < 192; ++bit_j) {
-            witness_bits[bit_j] = quicksilver_get_witness_vec(state, (witness_bit_offset + round_i * 192) + bit_j);
+#elif SECURITY_PARAM == 192
+
+        qs_gf193_bits inv_inputs[S_ENC];
+        qs_gf193_bits inv_outputs[S_ENC];
+        qs_gf193_bits pow_outputs[S_ENC];
+
+        qs_gf193_bits sk_bits;
+
+        for (size_t bit_j = 0; bit_j < 193; ++bit_j) {
+            sk_bits.bit[bit_j] = quicksilver_get_witness_vec(state, bit_j);
+
+            inv_outputs[0].bit[bit_j] =
+                quicksilver_get_witness_vec(state, bit_j + 200);
         }
-        quicksilver_vec_gf2 matmulres[192];
-        for (size_t matrow = 0; matrow < 192; matrow++) {
-            matmulres[matrow] = quicksilver_const_gf2(state, poly1_load(0, 0));
-            for (size_t matcol = 0; matcol < 192; matcol++) {
-                matmulres[matrow] = quicksilver_add_gf2(state,
-                matmulres[matrow],
-                quicksilver_mul_const_gf2(state, witness_bits[matcol], poly1_load(((uint8_t*)&rain_mat_192)[32*192*round_i + 32*matrow + matcol/8], matcol%8)));
+
+        qs_gf193_bits rc0_bits, rc1_bits, rc2_bits;
+
+        load_rc193_bits(state, &rc0_bits, greatwall_rc_193[0]);
+        load_rc193_bits(state, &rc1_bits, greatwall_rc_193[1]);
+        load_rc193_bits(state, &rc2_bits, greatwall_rc_193[2]);
+
+        qs_gf193_bits matrix0_output, matrix1_output, matrix2_output;
+
+        /* matrix0_output = M0 * sk */
+        for (size_t matrow = 0; matrow < 193; matrow++) {
+            matrix0_output.bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 193; matcol++) {
+                uint8_t bit = mat193_get_bit(greatwall_mat_193_0, matrow, matcol);
+
+                if (bit) {
+                    matrix0_output.bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            matrix0_output.bit[matrow],
+                            sk_bits.bit[matcol]
+                        );
+                }
             }
         }
-        memcpy(witness_bits, matmulres, sizeof(quicksilver_vec_gf2)*192);
-        rc_bytes = quicksilver_const_secpar_bits(state, (uint8_t*)&rain_rc_192[round_i+1]);
 
-        #elif SECURITY_PARAM == 256
-        quicksilver_vec_gf2 witness_bits[256];
-        for (size_t bit_j = 0; bit_j < 256; ++bit_j) {
-            witness_bits[bit_j] = quicksilver_get_witness_vec(state, (witness_bit_offset + round_i * 256) + bit_j);
+        /* inv_inputs[0] = M0 * sk + rc0 */
+        for (size_t i = 0; i < 193; ++i) {
+            inv_inputs[0].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix0_output.bit[i],
+                    rc0_bits.bit[i]
+                );
         }
-        quicksilver_vec_gf2 matmulres[256];
-        for (size_t matrow = 0; matrow < 256; matrow++) {
-            matmulres[matrow] = quicksilver_const_gf2(state, poly1_load(0, 0));
-            for (size_t matcol = 0; matcol < 256; matcol++) {
-                matmulres[matrow] = quicksilver_add_gf2(state,
-                matmulres[matrow],
-                quicksilver_mul_const_gf2(state, witness_bits[matcol], poly1_load(((uint8_t*)&rain_mat_256)[32*256*round_i + 32*matrow + matcol/8], matcol%8)));
+
+        /* pow_outputs[0] = PowMat_1 * inv_outputs[0] */
+        for (size_t matrow = 0; matrow < 193; matrow++) {
+            pow_outputs[0].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 193; matcol++) {
+                uint8_t bit =
+                    mat193_get_bit(greatwall_pow_mat_193_87, matrow, matcol);
+
+                if (bit) {
+                    pow_outputs[0].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            pow_outputs[0].bit[matrow],
+                            inv_outputs[0].bit[matcol]
+                        );
+                }
             }
         }
-        memcpy(witness_bits, matmulres, sizeof(quicksilver_vec_gf2)*256);
-        rc_bytes = quicksilver_const_secpar_bits(state, (uint8_t*)&rain_rc_256[round_i+1]);
 
-        #endif
+        /* tmp = inv_outputs[0] + sk */
+        qs_gf193_bits tmp;
 
-        // lifting the matmul results
-        state_bytes = quicksilver_combine_secpar_bits(state, witness_bits);
-
-        // // adding the sk + rc
-        output[round_i+1] = quicksilver_add_gfsecpar(state, state_bytes, quicksilver_add_gfsecpar(state, rc_bytes, sk_bytes));
-
-    }
-}
-
-static ALWAYS_INLINE void enc_bkwd(quicksilver_state* state, size_t witness_bit_offset, owf_block out, quicksilver_vec_gfsecpar* output) {
-    const uint8_t* out_bytes = (uint8_t*)&out;
-
-    for (size_t round_i = 0; round_i < OWF_ROUNDS-1; ++round_i) {
-        #if SECURITY_PARAM == 128
-        quicksilver_vec_gf2 witness_bits[128];
-        for (size_t bit_j = 0; bit_j < 128; ++bit_j) {
-            witness_bits[bit_j] = quicksilver_get_witness_vec(state, (witness_bit_offset + round_i * 128) + bit_j);
+        for (size_t i = 0; i < 193; ++i) {
+            tmp.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_outputs[0].bit[i],
+                    sk_bits.bit[i]
+                );
         }
-        #elif SECURITY_PARAM == 192
-        quicksilver_vec_gf2 witness_bits[192];
-        for (size_t bit_j = 0; bit_j < 192; ++bit_j) {
-            witness_bits[bit_j] = quicksilver_get_witness_vec(state, (witness_bit_offset + round_i * 192) + bit_j);
+
+        /* matrix1_output = M1 * tmp */
+        for (size_t matrow = 0; matrow < 193; matrow++) {
+            matrix1_output.bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 193; matcol++) {
+                uint8_t bit = mat193_get_bit(greatwall_mat_193_1, matrow, matcol);
+
+                if (bit) {
+                    matrix1_output.bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            matrix1_output.bit[matrow],
+                            tmp.bit[matcol]
+                        );
+                }
+            }
         }
-        #elif SECURITY_PARAM == 256
-        quicksilver_vec_gf2 witness_bits[256];
-        for (size_t bit_j = 0; bit_j < 256; ++bit_j) {
-            witness_bits[bit_j] = quicksilver_get_witness_vec(state, (witness_bit_offset + round_i * 256) + bit_j);
+
+        /* inv_inputs[1] = M1 * tmp + rc1 */
+        for (size_t i = 0; i < 193; ++i) {
+            inv_inputs[1].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix1_output.bit[i],
+                    rc1_bits.bit[i]
+                );
         }
-        #endif
-        output[round_i] = quicksilver_combine_secpar_bits(state, witness_bits);
-    }
 
-    // last round: substract the round key (sk)
-    quicksilver_vec_gfsecpar output_bytes = quicksilver_const_secpar_bits(state, out_bytes);
-    #if SECURITY_PARAM == 128
-    quicksilver_vec_gf2 sk_bits[128];
-    for (size_t bit_j = 0; bit_j < 128; ++bit_j) {
-        sk_bits[bit_j] = quicksilver_get_witness_vec(state, bit_j);
-    }
-    #elif SECURITY_PARAM == 192
-    quicksilver_vec_gf2 sk_bits[192];
-    for (size_t bit_j = 0; bit_j < 192; ++bit_j) {
-        sk_bits[bit_j] = quicksilver_get_witness_vec(state, bit_j);
-    }
-    #elif SECURITY_PARAM == 256
-    quicksilver_vec_gf2 sk_bits[256];
-    for (size_t bit_j = 0; bit_j < 256; ++bit_j) {
-        sk_bits[bit_j] = quicksilver_get_witness_vec(state, bit_j);
-    }
-    #endif
-    quicksilver_vec_gfsecpar sk_bytes = quicksilver_combine_secpar_bits(state, sk_bits);
+        /* public output bits */
+        qs_gf193_bits out_bits;
 
-    output[OWF_ROUNDS-1] = quicksilver_add_gfsecpar(state, sk_bytes, output_bytes);
+        for (size_t i = 0; i < 193; ++i) {
+            uint8_t b = (out.data[i >> 6] >> (i & 63)) & 1;
 
-}
+            out_bits.bit[i] = b
+                ? quicksilver_one_gf2(state)
+                : quicksilver_zero_gf2();
+        }
+
+        /*
+        * matrix2_output = inv_inputs[1] + rc2 + sk + out
+        */
+        for (size_t i = 0; i < 193; ++i) {
+            matrix2_output.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_inputs[1].bit[i],
+                    quicksilver_add_gf2(
+                        state,
+                        rc2_bits.bit[i],
+                        quicksilver_add_gf2(
+                            state,
+                            sk_bits.bit[i],
+                            out_bits.bit[i]
+                        )
+                    )
+                );
+        }
+
+        /* inv_outputs[1] = M2^{-1} * matrix2_output */
+        for (size_t matrow = 0; matrow < 193; matrow++) {
+            inv_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 193; matcol++) {
+                uint8_t bit =
+                    mat193_get_bit(greatwall_mat_193_2_inv, matrow, matcol);
+
+                if (bit) {
+                    inv_outputs[1].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            inv_outputs[1].bit[matrow],
+                            matrix2_output.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* pow_outputs[1] = PowMat_2 * inv_outputs[1] */
+        for (size_t matrow = 0; matrow < 193; matrow++) {
+            pow_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 193; matcol++) {
+                uint8_t bit =
+                    mat193_get_bit(greatwall_pow_mat_193_107, matrow, matcol);
+
+                if (bit) {
+                    pow_outputs[1].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            pow_outputs[1].bit[matrow],
+                            inv_outputs[1].bit[matcol]
+                        );
+                }
+            }
+        }
+        for(int i = 0; i < S_ENC; i++)qs_gf193_mul_constraint(state, &inv_inputs[i], &inv_outputs[i], &pow_outputs[i]);
+
+#elif SECURITY_PARAM == 256
+
+        qs_gf257_bits inv_inputs[S_ENC];
+        qs_gf257_bits inv_outputs[S_ENC];
+        qs_gf257_bits pow_outputs[S_ENC];
+
+        qs_gf257_bits sk_bits;
+
+
+        for (size_t bit_j = 0; bit_j < 257; ++bit_j) {
+            sk_bits.bit[bit_j] =
+                quicksilver_get_witness_vec(state, bit_j);
+
+            inv_outputs[0].bit[bit_j] =
+                quicksilver_get_witness_vec(state, bit_j + 264);
+        }
+
+        qs_gf257_bits rc0_bits, rc1_bits, rc2_bits;
+
+        load_rc257_bits(state, &rc0_bits, greatwall_rc_257[0]);
+        load_rc257_bits(state, &rc1_bits, greatwall_rc_257[1]);
+        load_rc257_bits(state, &rc2_bits, greatwall_rc_257[2]);
+
+        qs_gf257_bits matrix0_output, matrix1_output, matrix2_output;
+
+        /* matrix0_output = M0 * sk */
+        for (size_t matrow = 0; matrow < 257; matrow++) {
+            matrix0_output.bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 257; matcol++) {
+                uint8_t bit =
+                    mat257_get_bit(greatwall_mat_257_0, matrow, matcol);
+
+                if (bit) {
+                    matrix0_output.bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            matrix0_output.bit[matrow],
+                            sk_bits.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* inv_inputs[0] = M0 * sk + rc0 */
+        for (size_t i = 0; i < 257; ++i) {
+            inv_inputs[0].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix0_output.bit[i],
+                    rc0_bits.bit[i]
+                );
+        }
+
+        /* pow_outputs[0] = PowMat_1 * inv_outputs[0] */
+        for (size_t matrow = 0; matrow < 257; matrow++) {
+            pow_outputs[0].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 257; matcol++) {
+                uint8_t bit =
+                    mat257_get_bit(greatwall_pow_mat_257_114,
+                                   matrow,
+                                   matcol);
+
+                if (bit) {
+                    pow_outputs[0].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            pow_outputs[0].bit[matrow],
+                            inv_outputs[0].bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* tmp = inv_outputs[0] + sk */
+        qs_gf257_bits tmp;
+
+        for (size_t i = 0; i < 257; ++i) {
+            tmp.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_outputs[0].bit[i],
+                    sk_bits.bit[i]
+                );
+        }
+
+        /* matrix1_output = M1 * tmp */
+        for (size_t matrow = 0; matrow < 257; matrow++) {
+            matrix1_output.bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 257; matcol++) {
+                uint8_t bit =
+                    mat257_get_bit(greatwall_mat_257_1, matrow, matcol);
+
+                if (bit) {
+                    matrix1_output.bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            matrix1_output.bit[matrow],
+                            tmp.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* inv_inputs[1] = M1 * tmp + rc1 */
+        for (size_t i = 0; i < 257; ++i) {
+            inv_inputs[1].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix1_output.bit[i],
+                    rc1_bits.bit[i]
+                );
+        }
+
+        /* public output bits */
+        qs_gf257_bits out_bits;
+
+        for (size_t i = 0; i < 257; ++i) {
+            uint8_t b = (out.data[i >> 6] >> (i & 63)) & 1;
+
+            out_bits.bit[i] = b
+                ? quicksilver_one_gf2(state)
+                : quicksilver_zero_gf2(state);
+        }
+
+        /*
+         * matrix2_output = inv_inputs[1] + rc2 + sk + out
+         */
+        for (size_t i = 0; i < 257; ++i) {
+            matrix2_output.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_inputs[1].bit[i],
+                    quicksilver_add_gf2(
+                        state,
+                        rc2_bits.bit[i],
+                        quicksilver_add_gf2(
+                            state,
+                            sk_bits.bit[i],
+                            out_bits.bit[i]
+                        )
+                    )
+                );
+        }
+
+        /* inv_outputs[1] = M2^{-1} * matrix2_output */
+        for (size_t matrow = 0; matrow < 257; matrow++) {
+            inv_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 257; matcol++) {
+                uint8_t bit =
+                    mat257_get_bit(greatwall_mat_257_2_inv,
+                                   matrow,
+                                   matcol);
+
+                if (bit) {
+                    inv_outputs[1].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            inv_outputs[1].bit[matrow],
+                            matrix2_output.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* pow_outputs[1] = PowMat_2 * inv_outputs[1] */
+        for (size_t matrow = 0; matrow < 257; matrow++) {
+            pow_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 257; matcol++) {
+                uint8_t bit =
+                    mat257_get_bit(greatwall_pow_mat_257_124,
+                                   matrow,
+                                   matcol);
+
+                if (bit) {
+                    pow_outputs[1].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            pow_outputs[1].bit[matrow],
+                            inv_outputs[1].bit[matcol]
+                        );
+                }
+            }
+        }
+
+        for (int i = 0; i < S_ENC; i++) {
+            qs_gf257_mul_constraint(
+                state,
+                &inv_inputs[i],
+                &inv_outputs[i],
+                &pow_outputs[i]
+            );
+        }
+#elif SECURITY_PARAM == 512
+
+        qs_gf521_bits inv_inputs[S_ENC];
+        qs_gf521_bits inv_outputs[S_ENC];
+        qs_gf521_bits pow_outputs[S_ENC];
+
+        qs_gf521_bits sk_bits;
+
+        for (size_t bit_j = 0; bit_j < 521; ++bit_j) {
+            sk_bits.bit[bit_j] =
+                quicksilver_get_witness_vec(state, bit_j);
+
+            inv_outputs[0].bit[bit_j] =
+                quicksilver_get_witness_vec(state, bit_j + 528);
+        }
+
+        qs_gf521_bits rc0_bits, rc1_bits, rc2_bits;
+
+        load_rc521_bits(state, &rc0_bits, greatwall_rc_521[0]);
+        load_rc521_bits(state, &rc1_bits, greatwall_rc_521[1]);
+        load_rc521_bits(state, &rc2_bits, greatwall_rc_521[2]);
+
+        qs_gf521_bits matrix0_output, matrix1_output, matrix2_output;
+
+        /* matrix0_output = M0 * sk */
+        for (size_t matrow = 0; matrow < 521; matrow++) {
+            matrix0_output.bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 521; matcol++) {
+                uint8_t bit =
+                    mat521_get_bit(greatwall_mat_521_0, matrow, matcol);
+
+                if (bit) {
+                    matrix0_output.bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            matrix0_output.bit[matrow],
+                            sk_bits.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* inv_inputs[0] = M0 * sk + rc0 */
+        for (size_t i = 0; i < 521; ++i) {
+            inv_inputs[0].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix0_output.bit[i],
+                    rc0_bits.bit[i]
+                );
+        }
+
+        /* pow_outputs[0] = PowMat_1 * inv_outputs[0] */
+        for (size_t matrow = 0; matrow < 521; matrow++) {
+            pow_outputs[0].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 521; matcol++) {
+                uint8_t bit =
+                    mat521_get_bit(greatwall_pow_mat_521_248,
+                                   matrow,
+                                   matcol);
+
+                if (bit) {
+                    pow_outputs[0].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            pow_outputs[0].bit[matrow],
+                            inv_outputs[0].bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* tmp = inv_outputs[0] + sk */
+        qs_gf521_bits tmp;
+
+        for (size_t i = 0; i < 521; ++i) {
+            tmp.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_outputs[0].bit[i],
+                    sk_bits.bit[i]
+                );
+        }
+
+        /* matrix1_output = M1 * tmp */
+        for (size_t matrow = 0; matrow < 521; matrow++) {
+            matrix1_output.bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 521; matcol++) {
+                uint8_t bit =
+                    mat521_get_bit(greatwall_mat_521_1, matrow, matcol);
+
+                if (bit) {
+                    matrix1_output.bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            matrix1_output.bit[matrow],
+                            tmp.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* inv_inputs[1] = M1 * tmp + rc1 */
+        for (size_t i = 0; i < 521; ++i) {
+            inv_inputs[1].bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    matrix1_output.bit[i],
+                    rc1_bits.bit[i]
+                );
+        }
+
+        /* public output bits */
+        qs_gf521_bits out_bits;
+
+        for (size_t i = 0; i < 521; ++i) {
+            uint8_t b = (out.data[i >> 6] >> (i & 63)) & 1;
+
+            out_bits.bit[i] = b
+                ? quicksilver_one_gf2(state)
+                : quicksilver_zero_gf2(state);
+        }
+
+        /*
+         * matrix2_output = inv_inputs[1] + rc2 + sk + out
+         */
+        for (size_t i = 0; i < 521; ++i) {
+            matrix2_output.bit[i] =
+                quicksilver_add_gf2(
+                    state,
+                    inv_inputs[1].bit[i],
+                    quicksilver_add_gf2(
+                        state,
+                        rc2_bits.bit[i],
+                        quicksilver_add_gf2(
+                            state,
+                            sk_bits.bit[i],
+                            out_bits.bit[i]
+                        )
+                    )
+                );
+        }
+
+        /* inv_outputs[1] = M2^{-1} * matrix2_output */
+        for (size_t matrow = 0; matrow < 521; matrow++) {
+            inv_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 521; matcol++) {
+                uint8_t bit =
+                    mat521_get_bit(greatwall_mat_521_2_inv,
+                                   matrow,
+                                   matcol);
+
+                if (bit) {
+                    inv_outputs[1].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            inv_outputs[1].bit[matrow],
+                            matrix2_output.bit[matcol]
+                        );
+                }
+            }
+        }
+
+        /* pow_outputs[1] = PowMat_2 * inv_outputs[1] */
+        for (size_t matrow = 0; matrow < 521; matrow++) {
+            pow_outputs[1].bit[matrow] = quicksilver_zero_gf2();
+
+            for (size_t matcol = 0; matcol < 521; matcol++) {
+                uint8_t bit =
+                    mat521_get_bit(greatwall_pow_mat_521_273,
+                                   matrow,
+                                   matcol);
+
+                if (bit) {
+                    pow_outputs[1].bit[matrow] =
+                        quicksilver_add_gf2(
+                            state,
+                            pow_outputs[1].bit[matrow],
+                            inv_outputs[1].bit[matcol]
+                        );
+                }
+            }
+        }
+
+        for (int i = 0; i < S_ENC; i++) {
+            qs_gf521_mul_constraint(
+                state,
+                &inv_inputs[i],
+                &inv_outputs[i],
+                &pow_outputs[i]
+            );
+        }
 #endif
 
-#if defined(OWF_AES_CTR) || defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-static ALWAYS_INLINE void enc_constraints(quicksilver_state* state, const quicksilver_vec_gf2* round_key_bits,
-        const quicksilver_vec_gfsecpar* round_key_bytes, size_t block_num, owf_block in, owf_block out) {
-    // compute the starting index of the witness bits corresponding to the s-boxes in this round of
-    // encryption
-#if defined(OWF_AES_CTR)
-    const size_t witness_bit_offset = OWF_KEY_WITNESS_BITS + block_num * OWF_BLOCK_SIZE * 8 * (OWF_ROUNDS - 1);
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-    assert(block_num == 0);
-    const size_t witness_bit_offset = SECURITY_PARAM;
-#endif
-    quicksilver_vec_gfsecpar inv_inputs[S_ENC];
-    quicksilver_vec_gfsecpar inv_outputs[S_ENC];
-    enc_fwd(state, round_key_bytes, witness_bit_offset, in, inv_inputs);
-    enc_bkwd(state, round_key_bits, witness_bit_offset, out, inv_outputs);
+    // if (!state->verifier) {
+    // for (int i = 0; i < S_ENC; i++) {
+    //     block521 a = debug_qs_gf521_to_block(&inv_inputs[i]);
+    //     block521 b = debug_qs_gf521_to_block(&inv_outputs[i]);
+    //     block521 c = debug_qs_gf521_to_block(&pow_outputs[i]);
 
-    for (size_t sbox_j = 0; sbox_j < S_ENC; ++sbox_j) {
-        quicksilver_inverse_constraint(state, inv_inputs[sbox_j], inv_outputs[sbox_j]);
-    }
+    //     block521 lhs;
+    //     block521_mul(&lhs, &a, &b);
+
+    //     if (!debug_block521_eq(lhs, c)) {
+    //         printf("Plain prover constraint failed at i = %d\n", i);
+    //         debug_print_block521("inv_input", a);
+    //         debug_print_block521("inv_output", b);
+    //         debug_print_block521("lhs=input*output", lhs);
+    //         debug_print_block521("pow_output", c);
+    //     } else {
+    //         printf("Plain prover constraint OK at i = %d\n", i);
+    //     }
+    //         }
+    //     }
+
 }
-#elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
-static ALWAYS_INLINE void enc_constraints(quicksilver_state* state, owf_block in, owf_block out) {
-    // compute the starting index of the witness bits corresponding to the s-boxes in this round of
-    // encryption
-    const size_t witness_bit_offset = SECURITY_PARAM;
-
-    quicksilver_vec_gfsecpar inv_inputs[S_ENC];
-    quicksilver_vec_gfsecpar inv_outputs[S_ENC];
-    enc_fwd(state, witness_bit_offset, in, inv_inputs);
-    enc_bkwd(state, witness_bit_offset, out, inv_outputs);
-
-    for (size_t sbox_j = 0; sbox_j < S_ENC; ++sbox_j) {
-        quicksilver_inverse_constraint(state, inv_inputs[sbox_j], inv_outputs[sbox_j]);
-    }
-}
-#elif defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-static ALWAYS_INLINE void enc_constraints(quicksilver_state* state, const public_key* pk) {
-
-    #if defined(OWF_MQ_2_1)
-    quicksilver_vec_gf2 x[MQ_M];
-    #else
-    quicksilver_vec_gfsecpar x[MQ_M];
-    #endif
-
-    // Get the witness bits x.
-    for (uint64_t k = 0; k < MQ_M; ++k) {
-        #if defined(OWF_MQ_2_1)
-        x[k] = quicksilver_get_witness_vec(state, k);
-        //y_deg2[k] = quicksilver_const_deg2(state, poly_secpar_from_1(poly1_load(mq_y[k/8], k%8)));
-
-        #elif defined(OWF_MQ_2_8)
-        quicksilver_vec_gf2 x_gf2[MQ_GF_BITS];
-        for (uint64_t bit_j = 0; bit_j < MQ_GF_BITS; bit_j++)
-            x_gf2[bit_j] = quicksilver_get_witness_vec(state, k*MQ_GF_BITS + bit_j);
-            //y_gf2[bit_j] = poly1_load(mq_y[k], bit_j);
-        x[k] = quicksilver_combine_8_bits(state, x_gf2);
-        //y_deg2[k] = quicksilver_const_deg2(state, poly_secpar_from_8_poly1(y_gf2));
-        #endif
-    }
-
-    bool skip_diag = (MQ_GF_BITS == 1);
-
-    for (uint64_t i = 0; i < OWF_NUM_CONSTRAINTS; i++)
-    {
-        quicksilver_vec_deg2 owf_i = quicksilver_zero_deg2();
-
-        // public const A
-        const block_secpar* A_b_i = pk->mq_A_b + i;
-        for (uint64_t j = 0; j < MQ_M; j++)
-        {
-            // b is interleaved with A, with b always being the first entry of the row.
-            poly_secpar_vec b_j = poly_secpar_load_dup(A_b_i);
-            A_b_i += OWF_NUM_CONSTRAINTS;
-            quicksilver_vec_gfsecpar Ax_plus_b_j = quicksilver_const_gfsecpar(state, b_j);
-
-            // Only the upper triangle is stored, so k should start from j (+1 for strictly upper
-            // triangular).
-            for (size_t k = j + skip_diag; k < MQ_M; ++k, A_b_i += OWF_NUM_CONSTRAINTS)
-            {
-                poly_secpar_vec A_jk = poly_secpar_load_dup(A_b_i);
-                #if defined(OWF_MQ_2_1)
-                quicksilver_vec_gfsecpar term = quicksilver_mul_const_gf2_gfsecpar(state, x[k], A_jk);
-                #else
-                quicksilver_vec_gfsecpar term = quicksilver_mul_const(state, x[k], A_jk);
-                #endif
-
-                Ax_plus_b_j = quicksilver_add_gfsecpar(state, Ax_plus_b_j, term);
-            }
-
-            #if defined(OWF_MQ_2_1)
-            quicksilver_vec_gfsecpar x_j = quicksilver_combine_1_bit(state, x[j]);
-            #else
-            quicksilver_vec_gfsecpar x_j = x[j];
-            #endif
-
-            owf_i = quicksilver_add_deg2(state, owf_i, quicksilver_mul(state, x_j, Ax_plus_b_j));
-        }
-
-        quicksilver_constraint(state, quicksilver_add_deg2(state, owf_i, quicksilver_const_deg2(state, pk->mq_y_gfsecpar[i])));
-    }
-}
-
-#endif
 
 static ALWAYS_INLINE void owf_constraints(quicksilver_state* state, const public_key* pk)
 {
-#if defined(OWF_AES_CTR) || defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-    quicksilver_vec_gf2 round_key_bits[8 * OWF_BLOCK_SIZE * (OWF_ROUNDS + 1)];
-    quicksilver_vec_gfsecpar round_key_bytes[OWF_BLOCK_SIZE * (OWF_ROUNDS + 1)];
-#endif
-#if defined(OWF_AES_CTR)
-    key_sched_constraints(state, round_key_bits, round_key_bytes);
-    for (size_t i = 0; i < OWF_BLOCKS; ++i) {
-        enc_constraints(state, round_key_bits, round_key_bytes, i, pk->owf_input[i], pk->owf_output[i]);
-    }
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-    load_fixed_round_key(state, round_key_bits, round_key_bytes, &pk->fixed_key);
-    enc_constraints(state, round_key_bits, round_key_bytes, 0, owf_block_set_low32(0), pk->owf_output[0]);
-#elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
-    enc_constraints(state, pk->owf_input[0], pk->owf_output[0]);
-#elif defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-    enc_constraints(state, pk);
-#else
-#error "unsupported OWF"
-#endif
+    enc_constraints(state, pk->owf_output);
 }
 
 void owf_constraints_prover(quicksilver_state* state, const public_key* pk)
@@ -546,8 +1339,6 @@ void owf_constraints_verifier(quicksilver_state* state, const public_key* pk)
 }
 
 
-#if !(defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8))
-extern inline owf_block owf_block_xor(owf_block x, owf_block y);
-extern inline owf_block owf_block_set_low32(uint32_t x);
-extern inline bool owf_block_any_zeros(owf_block x);
-#endif
+// extern inline owf_block owf_block_xor(owf_block x, owf_block y);
+// extern inline owf_block owf_block_set_low32(uint32_t x);
+// extern inline bool owf_block_any_zeros(owf_block x);

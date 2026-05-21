@@ -42,6 +42,14 @@ typedef struct
 {
 	poly128_vec data[4]; // Striped in 128-bit chunks.
 } poly512_vec;
+typedef struct
+{
+	poly128_vec data[5]; // Striped in 128-bit chunks. Highest 64 bits are ignored.
+} poly576_vec;
+typedef struct
+{
+	poly128_vec data[8]; // Striped in 128-bit chunks.
+} poly1024_vec;
 
 inline poly1_vec poly1_set_all(uint8_t x)
 {
@@ -248,6 +256,29 @@ inline poly256_vec poly256_load_dup(const void* s)
 	return out;
 }
 
+inline poly512_vec poly512_load_dup(const void* s)
+{
+	block128 in[4];
+
+	memcpy(&in[0], s, 4 * sizeof(block128));
+
+	poly512_vec out;
+#if POLY_VEC_LEN == 1
+	out.data[0] = in[0];
+	out.data[1] = in[1];
+	out.data[2] = in[2];
+	out.data[3] = in[3];
+
+#elif POLY_VEC_LEN == 2
+	out.data[0] = _mm256_inserti128_si256(_mm256_castsi128_si256(in[0]), in[0], 1);
+	out.data[1] = _mm256_inserti128_si256(_mm256_castsi128_si256(in[1]), in[1], 1);
+	out.data[2] = _mm256_inserti128_si256(_mm256_castsi128_si256(in[2]), in[2], 1);
+	out.data[3] = _mm256_inserti128_si256(_mm256_castsi128_si256(in[3]), in[3], 1);
+#endif
+
+	return out;
+}
+
 inline void poly64_store(void* d, poly64_vec s)
 {
 #if POLY_VEC_LEN == 1
@@ -343,6 +374,14 @@ inline void poly256_store1(void* d, poly256_vec s)
 	memcpy(((unsigned char*) d) + 16, &s.data[1], 16);
 }
 
+inline void poly512_store1(void* d, poly512_vec s)
+{
+	memcpy(d, &s.data[0], 16);
+	memcpy(((unsigned char*) d) + 16, &s.data[1], 16);
+	memcpy(((unsigned char*) d) + 32, &s.data[2], 16);
+	memcpy(((unsigned char*) d) + 48, &s.data[3], 16);
+}
+
 inline poly128_vec poly128_from_64(poly64_vec x)
 {
 	// set the unused bits to zero
@@ -413,6 +452,31 @@ inline poly512_vec poly512_from_256(poly256_vec x)
 	return out;
 }
 
+inline poly576_vec poly576_from_512(poly512_vec x)
+{
+	poly576_vec out;
+	out.data[0] = x.data[0];
+	out.data[1] = x.data[1];
+	out.data[2] = x.data[2];
+	out.data[3] = x.data[3];
+	out.data[4] = clmul_block_set_zero();
+	return out;
+}
+
+inline poly1024_vec poly1024_from_512(poly512_vec x)
+{
+	poly1024_vec out;
+	out.data[0] = x.data[0];
+	out.data[1] = x.data[1];
+	out.data[2] = x.data[2];
+	out.data[3] = x.data[3];
+	out.data[4] = clmul_block_set_zero();
+	out.data[5] = clmul_block_set_zero();
+	out.data[6] = clmul_block_set_zero();
+	out.data[7] = clmul_block_set_zero();
+	return out;
+}
+
 inline void add_clmul_block_vectors(clmul_block* x, const clmul_block* y, size_t n)
 {
 	for (size_t i = 0; i < n; ++i)
@@ -450,6 +514,16 @@ inline poly384_vec poly384_add(poly384_vec x, poly384_vec y)
 inline poly512_vec poly512_add(poly512_vec x, poly512_vec y)
 {
 	add_clmul_block_vectors(&x.data[0], &y.data[0], 4);
+	return x;
+}
+inline poly576_vec poly576_add(poly576_vec x, poly576_vec y)
+{
+	add_clmul_block_vectors(&x.data[0], &y.data[0], 5);
+	return x;
+}
+inline poly1024_vec poly1024_add(poly1024_vec x, poly1024_vec y)
+{
+	add_clmul_block_vectors(&x.data[0], &y.data[0], 8);
 	return x;
 }
 
@@ -580,6 +654,30 @@ inline poly512_vec poly256_mul(poly256_vec x, poly256_vec y)
 	return out;
 }
 
+inline poly1024_vec poly512_mul(poly512_vec x, poly512_vec y)
+{
+	poly128_vec combined[15];
+	for (size_t i = 0; i < 15; ++i)
+		combined[i] = clmul_block_set_zero();
+
+	for (size_t i = 0; i < 4; ++i)
+	{
+		for (size_t j = 0; j < 4; ++j)
+		{
+			poly128_vec xy[3];
+			karatsuba_mul_128_uncombined(x.data[i], y.data[j], &xy[0]);
+			size_t offset = 2 * (i + j);
+			combined[offset] = poly128_add(combined[offset], xy[0]);
+			combined[offset + 1] = poly128_add(combined[offset + 1], xy[1]);
+			combined[offset + 2] = poly128_add(combined[offset + 2], xy[2]);
+		}
+	}
+
+	poly1024_vec out;
+	combine_poly128s(&out.data[0], &combined[0], 15);
+	return out;
+}
+
 // High 64 of output will be zero.
 inline poly192_vec poly64x128_mul(poly64_vec x, poly128_vec y)
 {
@@ -614,6 +712,20 @@ inline poly320_vec poly64x256_mul(poly64_vec x, poly256_vec y)
 
 	poly320_vec out;
 	combine_poly128s(&out.data[0], &xy[0], 4);
+	return out;
+}
+
+inline poly576_vec poly64x512_mul(poly64_vec x, poly512_vec y)
+{
+	clmul_block xy[8];
+	for (size_t i = 0; i < 4; ++i)
+	{
+		xy[2 * i] = clmul_block_clmul_ll(x, y.data[i]);
+		xy[2 * i + 1] = clmul_block_clmul_lh(x, y.data[i]);
+	}
+
+	poly576_vec out;
+	combine_poly128s(&out.data[0], &xy[0], 8);
 	return out;
 }
 
@@ -675,9 +787,18 @@ inline poly512_vec poly1x512_mul(poly1_vec x, poly512_vec y)
 	return out;
 }
 
+inline poly1024_vec poly1x1024_mul(poly1_vec x, poly1024_vec y)
+{
+	clmul_block mask = poly1_to_bit_mask(x);
+	poly1024_vec out;
+	for (size_t i = 0; i < 8; ++i)
+		out.data[i] = clmul_block_and(mask, y.data[i]);
+	return out;
+}
+
 inline void poly_shift_left_1(clmul_block* x, size_t chunks)
 {
-	clmul_block low[4], high[4], high_shifted[4];
+	clmul_block low[8], high[8], high_shifted[8];
 	for (size_t i = 0; i < chunks; ++i)
 	{
 #if POLY_VEC_LEN == 1
@@ -722,6 +843,11 @@ inline poly512_vec poly512_shift_left_1(poly512_vec x)
 	poly_shift_left_1(&x.data[0], 4);
 	return x;
 }
+inline poly1024_vec poly1024_shift_left_1(poly1024_vec x)
+{
+	poly_shift_left_1(&x.data[0], 8);
+	return x;
+}
 
 inline poly256_vec poly256_shift_left_8(poly256_vec x)
 {
@@ -739,6 +865,12 @@ inline poly512_vec poly512_shift_left_8(poly512_vec x)
 {
 	poly512_vec out;
 	poly_shift_left_8(&out.data[0], &x.data[0], 4);
+	return out;
+}
+inline poly1024_vec poly1024_shift_left_8(poly1024_vec x)
+{
+	poly1024_vec out;
+	poly_shift_left_8(&out.data[0], &x.data[0], 8);
 	return out;
 }
 
@@ -762,6 +894,13 @@ inline poly256_vec poly256_set_zero()
 	poly256_vec out;
 	out.data[0] = poly128_set_zero();
 	out.data[1] = poly128_set_zero();
+	return out;
+}
+inline poly512_vec poly512_set_zero()
+{
+	poly512_vec out;
+	for (size_t i = 0; i < 4; ++i)
+		out.data[i] = poly128_set_zero();
 	return out;
 }
 
@@ -886,6 +1025,31 @@ inline poly256_vec poly512_reduce256(poly512_vec x)
 	return out;
 }
 
+inline poly512_vec poly1024_reduce512(poly1024_vec x)
+{
+	poly64_vec modulus = poly64_set_low32(gf512_modulus);
+	clmul_block xmod[8];
+	xmod[0] = clmul_block_set_zero();
+	xmod[1] = clmul_block_clmul_lh(modulus, x.data[4]);
+	xmod[2] = clmul_block_clmul_ll(modulus, x.data[5]);
+	xmod[3] = clmul_block_clmul_lh(modulus, x.data[5]);
+	xmod[4] = clmul_block_clmul_ll(modulus, x.data[6]);
+	xmod[5] = clmul_block_clmul_lh(modulus, x.data[6]);
+	xmod[6] = clmul_block_clmul_ll(modulus, x.data[7]);
+	xmod[7] = clmul_block_clmul_lh(modulus, x.data[7]);
+
+	clmul_block xmod_combined[5];
+	combine_poly128s(&xmod_combined[0], &xmod[0], 8);
+	for (size_t i = 0; i < 5; ++i)
+		xmod_combined[i] = poly128_add(xmod_combined[i], x.data[i]);
+	xmod_combined[0] = poly128_add(xmod_combined[0], clmul_block_clmul_ll(modulus, xmod_combined[4]));
+
+	poly512_vec out;
+	for (size_t i = 0; i < 4; ++i)
+		out.data[i] = xmod_combined[i];
+	return out;
+}
+
 inline poly128_vec poly192_reduce128(poly192_vec x)
 {
 	poly64_vec modulus = poly64_set_low32(gf128_modulus);
@@ -907,6 +1071,17 @@ inline poly256_vec poly320_reduce256(poly320_vec x)
 	poly256_vec out;
 	out.data[1] = x.data[1];
 	out.data[0] = poly128_add(x.data[0], clmul_block_clmul_ll(modulus, x.data[2]));
+	return out;
+}
+
+inline poly512_vec poly576_reduce512(poly576_vec x)
+{
+	poly64_vec modulus = poly64_set_low32(gf512_modulus);
+	poly512_vec out;
+	out.data[0] = poly128_add(x.data[0], clmul_block_clmul_ll(modulus, x.data[4]));
+	out.data[1] = x.data[1];
+	out.data[2] = x.data[2];
+	out.data[3] = x.data[3];
 	return out;
 }
 
@@ -937,6 +1112,16 @@ inline poly256_vec poly256_from_1(poly1_vec x)
     poly256_vec out;
     out.data[0] = poly128_from_1(x);
     out.data[1] = clmul_block_set_zero();
+    return out;
+}
+
+inline poly512_vec poly512_from_1(poly1_vec x)
+{
+    poly512_vec out;
+    out.data[0] = poly128_from_1(x);
+    out.data[1] = clmul_block_set_zero();
+    out.data[2] = clmul_block_set_zero();
+    out.data[3] = clmul_block_set_zero();
     return out;
 }
 
@@ -1039,6 +1224,41 @@ inline poly256_vec poly256_from_16_poly1(const poly1_vec* bits)
 	for (size_t i = 1; i < 16; ++i) {
 		out = poly256_add(out, poly1x256_mul(bits[i], cur_root));
 		cur_root = poly512_reduce256(poly256_mul(cur_root, root));
+	}
+	return out;
+}
+
+inline poly512_vec poly512_from_8_poly1(const poly1_vec* bits)
+{
+	poly512_vec out = poly512_from_1(bits[0]);
+	poly512_vec curr_alpha = poly512_set_low32(2);
+	for (size_t i = 1; i < 8; ++i) {
+		out = poly512_add(out, poly1x512_mul(bits[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, poly512_set_low32(2)));
+	}
+	return out;
+}
+
+inline poly512_vec poly512_from_512_poly1(const poly1_vec* bits)
+{
+	poly512_vec out = poly512_from_1(bits[0]);
+	poly512_vec alpha = poly512_set_low32(2);
+	poly512_vec curr_alpha = alpha;
+	for (size_t i = 1; i < 512; ++i) {
+		out = poly512_add(out, poly1x512_mul(bits[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, alpha));
+	}
+	return out;
+}
+
+inline poly512_vec poly512_from_16_poly1(const poly1_vec* bits)
+{
+	poly512_vec out = poly512_from_1(bits[0]);
+	poly512_vec alpha = poly512_set_low32(2);
+	poly512_vec curr_alpha = alpha;
+	for (size_t i = 1; i < 16; ++i) {
+		out = poly512_add(out, poly1x512_mul(bits[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, alpha));
 	}
 	return out;
 }
@@ -1156,6 +1376,55 @@ inline poly256_vec poly256_from_16_poly256(const poly256_vec* polys)
 	return poly512_reduce256(out);
 }
 
+inline poly512_vec poly512_from_8_poly512(const poly512_vec* polys)
+{
+	poly1024_vec out = poly1024_from_512(polys[0]);
+	poly512_vec alpha = poly512_set_low32(2);
+	poly512_vec curr_alpha = alpha;
+	for (size_t i = 1; i < 8; ++i) {
+		out = poly1024_add(out, poly512_mul(polys[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, alpha));
+	}
+	return poly1024_reduce512(out);
+}
+
+inline poly512_vec poly512_from_8_poly64(const poly64_vec* polys)
+{
+	poly576_vec out = poly576_from_512(poly512_from_1(0));
+	out.data[0] = poly128_from_64(polys[0]);
+	poly512_vec alpha = poly512_set_low32(2);
+	poly512_vec curr_alpha = alpha;
+	for (size_t i = 1; i < 8; ++i) {
+		out = poly576_add(out, poly64x512_mul(polys[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, alpha));
+	}
+	return poly576_reduce512(out);
+}
+
+inline poly512_vec poly512_from_512_poly512(const poly512_vec* polys)
+{
+	poly1024_vec out = poly1024_from_512(polys[0]);
+	poly512_vec alpha = poly512_set_low32(2);
+	poly512_vec curr_alpha = alpha;
+	for (size_t i = 1; i < 512; ++i) {
+		out = poly1024_add(out, poly512_mul(polys[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, alpha));
+	}
+	return poly1024_reduce512(out);
+}
+
+inline poly512_vec poly512_from_16_poly512(const poly512_vec* polys)
+{
+	poly1024_vec out = poly1024_from_512(polys[0]);
+	poly512_vec alpha = poly512_set_low32(2);
+	poly512_vec curr_alpha = alpha;
+	for (size_t i = 1; i < 16; ++i) {
+		out = poly1024_add(out, poly512_mul(polys[i], curr_alpha));
+		curr_alpha = poly1024_reduce512(poly512_mul(curr_alpha, alpha));
+	}
+	return poly1024_reduce512(out);
+}
+
 inline poly128_vec poly128_from_byte(uint8_t byte)
 {
 	poly1_vec bits[8];
@@ -1178,6 +1447,14 @@ inline poly256_vec poly256_from_byte(uint8_t byte)
 	for (size_t i = 0; i < 8; ++i)
 		bits[i] = poly1_set_all(expand_bit_to_byte(byte, i));
 	return poly256_from_8_poly1(bits);
+}
+
+inline poly512_vec poly512_from_byte(uint8_t byte)
+{
+	poly1_vec bits[8];
+	for (size_t i = 0; i < 8; ++i)
+		bits[i] = poly1_set_all(expand_bit_to_byte(byte, i));
+	return poly512_from_8_poly1(bits);
 }
 
 inline bool poly64_eq(poly64_vec x, poly64_vec y)
@@ -1274,6 +1551,40 @@ inline bool poly512_eq(poly512_vec x, poly512_vec y)
 #endif
 }
 
+inline bool poly576_eq(poly576_vec x, poly576_vec y)
+{
+#if POLY_VEC_LEN == 1
+    __m128i tmp0 = _mm_xor_si128(x.data[0], y.data[0]);
+    __m128i tmp1 = _mm_xor_si128(x.data[1], y.data[1]);
+    __m128i tmp2 = _mm_xor_si128(x.data[2], y.data[2]);
+    __m128i tmp3 = _mm_xor_si128(x.data[3], y.data[3]);
+    return _mm_test_all_zeros(tmp0, tmp0) && _mm_test_all_zeros(tmp1, tmp1) &&
+           _mm_test_all_zeros(tmp2, tmp2) && _mm_test_all_zeros(tmp3, tmp3) &&
+           (_mm_cvtsi128_si64(x.data[4]) == _mm_cvtsi128_si64(y.data[4]));
+#elif POLY_VEC_LEN == 2
+#error "not implemented"
+#endif
+}
+
+inline bool poly1024_eq(poly1024_vec x, poly1024_vec y)
+{
+	for (size_t i = 0; i < 8; ++i)
+#if POLY_VEC_LEN == 1
+	{
+		__m128i tmp = _mm_xor_si128(x.data[i], y.data[i]);
+		if (!_mm_test_all_zeros(tmp, tmp))
+			return false;
+	}
+#elif POLY_VEC_LEN == 2
+	{
+		__m256i tmp = _mm256_xor_si256(x.data[i], y.data[i]);
+		if (!_mm256_test_all_zeros(tmp, tmp))
+			return false;
+	}
+#endif
+	return true;
+}
+
 inline poly64_vec poly64_extract(poly64_vec x, size_t index)
 {
 #if POLY_VEC_LEN == 1
@@ -1325,6 +1636,16 @@ inline poly384_vec poly384_extract(poly384_vec x, size_t index)
 }
 
 inline poly512_vec poly512_extract(poly512_vec x, size_t index)
+{
+#if POLY_VEC_LEN == 1
+    (void) index;
+    return x;
+#elif POLY_VEC_LEN == 2
+#error "not implemented"
+#endif
+}
+
+inline poly1024_vec poly1024_extract(poly1024_vec x, size_t index)
 {
 #if POLY_VEC_LEN == 1
     (void) index;

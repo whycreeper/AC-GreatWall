@@ -1,10 +1,38 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include "vole_commit.h"
 
 #include <stdalign.h>
 #include <stdlib.h>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 #include "small_vole.h"
 #include "vector_com.h"
 #include "hash.h"
+
+static void* vole_commit_aligned_alloc(size_t alignment, size_t size)
+{
+#if defined(_WIN32)
+	return _aligned_malloc(size, alignment);
+#else
+	void* ptr = NULL;
+	if (posix_memalign(&ptr, alignment, size) != 0)
+		return NULL;
+	return ptr;
+#endif
+}
+
+static void vole_commit_aligned_free(void* ptr)
+{
+#if defined(_WIN32)
+	_aligned_free(ptr);
+#else
+	free(ptr);
+#endif
+}
 
 static void hash_hashed_leaves_all_same_size(
 	hash_state* hasher, block_2secpar* hashed_leaves, size_t num_trees, size_t num_leaves)
@@ -58,7 +86,7 @@ void vole_commit(
 	uint8_t* restrict commitment, uint8_t* restrict check)
 {
 	block_secpar* leaves =
-		aligned_alloc(alignof(block_secpar), VECTOR_COMMIT_LEAVES * sizeof(block_secpar));
+		vole_commit_aligned_alloc(alignof(block_secpar), VECTOR_COMMIT_LEAVES * sizeof(block_secpar));
 
 #if USE_IMPROVED_VECTOR_COMMITMENTS == 0
 	vector_commit(seed, iv, forest, leaves, hashed_leaves);
@@ -94,7 +122,7 @@ void vole_commit(
 	// Clear unused VOLE columns (corresponding to 0 bits of Delta.)
 	memset(v, 0, VOLE_COL_BLOCKS * ZERO_BITS_IN_CHALLENGE_3 * sizeof(*v));
 
-	free(leaves);
+	vole_commit_aligned_free(leaves);
 }
 
 bool vole_reconstruct(
@@ -103,9 +131,9 @@ bool vole_reconstruct(
 {
 	bool success = 1;
 	block_secpar* leaves =
-		aligned_alloc(alignof(block_secpar), VECTOR_COMMIT_LEAVES * sizeof(block_secpar));
+		vole_commit_aligned_alloc(alignof(block_secpar), VECTOR_COMMIT_LEAVES * sizeof(block_secpar));
 	block_2secpar* hashed_leaves =
-		aligned_alloc(alignof(block_2secpar), VECTOR_COMMIT_LEAVES * sizeof(block_2secpar));
+		vole_commit_aligned_alloc(alignof(block_2secpar), VECTOR_COMMIT_LEAVES * sizeof(block_2secpar));
 
 #if USE_IMPROVED_VECTOR_COMMITMENTS == 0
 	bool vector_verify_status = vector_verify(iv, opening, delta_bytes, leaves, hashed_leaves);
@@ -150,7 +178,7 @@ bool vole_reconstruct(
 	memset(q, 0, VOLE_COL_BLOCKS * ZERO_BITS_IN_CHALLENGE_3 * sizeof(*q));
 
 end:
-	free(hashed_leaves);
-	free(leaves);
+	vole_commit_aligned_free(hashed_leaves);
+	vole_commit_aligned_free(leaves);
 	return success;
 }

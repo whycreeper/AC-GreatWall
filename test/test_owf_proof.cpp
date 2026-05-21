@@ -1,8 +1,7 @@
 #include <array>
 
 #include "test.hpp"
-#include "test_witness.hpp"
-
+#define MARK(x) do { fprintf(stderr, "[MARK] %s\n", x); fflush(stderr); } while (0)
 extern "C" {
 
 #include "api.h"
@@ -15,9 +14,9 @@ extern "C" {
 #include "catch_amalgamated.hpp"
 
 TEST_CASE( "owf proof", "[owf proof]" ) {
-    std::array<uint8_t, FAEST_SECRET_KEY_BYTES> packed_sk;
-    std::array<uint8_t, FAEST_PUBLIC_KEY_BYTES> packed_pk;
-    std::array<uint8_t, FAEST_PUBLIC_KEY_BYTES> packed_pk2;
+    std::array<uint8_t, GREATWALL_SECRET_KEY_BYTES> packed_sk;
+    std::array<uint8_t, GREATWALL_PUBLIC_KEY_BYTES> packed_pk;
+    std::array<uint8_t, GREATWALL_PUBLIC_KEY_BYTES> packed_pk2;
     test_gen_keypair(packed_pk.data(), packed_sk.data());
 
     secret_key sk;

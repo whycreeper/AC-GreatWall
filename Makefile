@@ -21,21 +21,24 @@ common_sources = $(common_headers) Catch2/extras/catch_amalgamated.cpp
 submission_versions = sec128_cccs_11_0_pprf sec128_cccs_16_0_pprf sec192_cccs_16_0_pprf sec192_cccs_24_0_pprf sec256_cccs_22_0_pprf sec256_cccs_32_0_pprf sec128_eccs_11_0_pprf sec128_eccs_16_0_pprf sec192_eccs_16_0_pprf sec192_eccs_24_0_pprf sec256_eccs_22_0_pprf sec256_eccs_32_0_pprf
 
 security_params = 128 192 256
+build_security_params = $(security_params) 512
 archs = avx2
 
 # Default settings to build with `make all`. Other settings are allowed.
 taus_128 = 11 16
 taus_192 = 16 24
 taus_256 = 22 32
-seeds_thresholds_128 = pprf 98 # If pprf, use old non-batch vector commitments.
+seeds_thresholds_128 = pprf 98 100# If pprf, use old non-batch vector commitments.
 seeds_thresholds_192 = pprf 147
 seeds_thresholds_256 = pprf 196
-owfs = c e r3 r4 mq1 mq8
+taus_512 = 64
+seeds_thresholds_512 = pprf
+owfs = c e r3 r4 mq1 mq8 gw
 prgs = c
 tree_prgs = c
 leaf_prgs = c s
 
-zero_bit_counts = 0 6
+zero_bit_counts = 0 6 7
 
 default_settings := \
 	$(foreach security_param,$(security_params),\
@@ -59,6 +62,8 @@ default_settings := \
 			)\
 		)\
 	)
+
+default_settings += sec512_gwccs_64_0_pprf_avx2
 
 default: $(default_settings)
 .PHONY: default
@@ -106,7 +111,7 @@ endef
 # might not work.
 
 targets = all default
-$(foreach security_param,$(security_params),\
+$(foreach security_param,$(build_security_params),\
 	$(foreach arch,$(archs),\
 		$(foreach target,$(targets),\
 			$(eval $(call recursion-recipe,$(arch),$(security_param),Additional_Implementations,$(target)))\

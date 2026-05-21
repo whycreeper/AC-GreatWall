@@ -110,6 +110,8 @@ inline std::string poly512_vec_to_string(poly512_vec pv) {
 #define REQUIRE_POLY_SECPAR_VEC_EQ(a, b) REQUIRE_POLY192VEC_EQ(a, b)
 #elif SECURITY_PARAM == 256
 #define REQUIRE_POLY_SECPAR_VEC_EQ(a, b) REQUIRE_POLY256VEC_EQ(a, b)
+#elif SECURITY_PARAM == 512
+#define REQUIRE_POLY_SECPAR_VEC_EQ(a, b) REQUIRE_POLY512VEC_EQ(a, b)
 #endif
 
 inline std::ostream& operator<<(std::ostream& o, const std::vector<uint8_t>& array)
@@ -166,6 +168,17 @@ inline block256 rand<block256>() {
 		data[i] = rand();
 
 	block256 output;
+	memcpy(&output, &data[0], sizeof(output));
+	return output;
+}
+
+template <>
+inline block512 rand<block512>() {
+	std::array<uint64_t, 8> data;
+	for (size_t i = 0; i < data.size(); ++i)
+		data[i] = rand();
+
+	block512 output;
 	memcpy(&output, &data[0], sizeof(output));
 	return output;
 }
@@ -234,7 +247,31 @@ inline void test_gen_keypair(unsigned char* pk, unsigned char* sk)
 {
 	do
 	{
-        std::generate(sk, sk + FAEST_SECRET_KEY_BYTES, rand<uint8_t>);
+#if SECURITY_PARAM == 128
+        uint8_t field[18];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[17] &= 0x01;
+		memcpy(sk, field, 18);
+
+#elif SECURITY_PARAM == 192
+        uint8_t field[25];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[24] &= 0x01;
+		memcpy(sk, field, 25);
+
+#elif SECURITY_PARAM == 256
+        uint8_t field[33];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[32] &= 0x01;
+		memcpy(sk, field, 33);
+
+#elif SECURITY_PARAM == 512
+        uint8_t field[66];
+        std::generate(field, field + GREATWALL_SECRET_KEY_BYTES, rand<uint8_t>);
+		field[65] &= 0x01;
+		memcpy(sk, field, 66);
+
+#endif
 	} while (!faest_pubkey(pk, sk));
 }
 

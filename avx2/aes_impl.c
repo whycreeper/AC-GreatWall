@@ -8,7 +8,7 @@
 typedef struct
 {
 	// These represent round keys for subsequent rounds, only with sbox outputs not yet XORed in.
-	block128 key_slices[SECURITY_PARAM / 32];
+	block128 key_slices[AES_KEY_BITS / 32];
 
 	// Input to the next SBox.
 	block128 next_sbox;
@@ -68,10 +68,10 @@ ALWAYS_INLINE void aes_keygen_init(
 		for (size_t j = chunk_size; j < KEYGEN_WIDTH; ++j)
 			keys[j] = block_secpar_set_zero();
 
-#if SECURITY_PARAM == 128
+#if AES_KEY_BITS == 128
 		transpose4x4_32(&keygen_states->key_slices[0], &keys[0]);
 
-#elif SECURITY_PARAM == 192
+#elif AES_KEY_BITS == 192
 		block128 low128s[KEYGEN_WIDTH];
 		for (size_t j = 0; j < KEYGEN_WIDTH; ++j)
 			memcpy(&low128s[j], &keys[j], sizeof(block128));
@@ -81,7 +81,7 @@ ALWAYS_INLINE void aes_keygen_init(
 		transpose4x4_32(&keygen_states->key_slices[0], &low128s[0]);
 		transpose4x2_32(&keygen_states->key_slices[4], hi64_01, hi64_23);
 
-#elif SECURITY_PARAM == 256
+#elif AES_KEY_BITS == 256
 		block128 low128s[KEYGEN_WIDTH];
 		block128 hi128s[KEYGEN_WIDTH];
 		for (size_t j = 0; j < KEYGEN_WIDTH; ++j)
@@ -94,13 +94,13 @@ ALWAYS_INLINE void aes_keygen_init(
 		transpose4x4_32(&keygen_states->key_slices[4], &hi128s[0]);
 #endif
 
-		keygen_states->next_sbox = keygen_states->key_slices[SECURITY_PARAM / 32 - 1];
+		keygen_states->next_sbox = keygen_states->key_slices[AES_KEY_BITS / 32 - 1];
 
 		// Get ready for next rounds (starting with round 1 for 128 or 192 bit keys, or round 2 for
 		// 256 bit keys).
-		if (SECURITY_PARAM == 128)
+		if (AES_KEY_BITS == 128)
 			cumulative_xor(&keygen_states->key_slices[0], 4);
-		else if (SECURITY_PARAM == 192)
+		else if (AES_KEY_BITS == 192)
 		{
 			shift2_mod6(&keygen_states->key_slices[0]);
 			cumulative_xor(&keygen_states->key_slices[2], 4);
@@ -116,7 +116,7 @@ ALWAYS_INLINE void aes_keygen_init(
 ALWAYS_INLINE void aes_keygen_round(
 	aes_keygen_state* keygen_states, aes_round_keys* aeses, size_t num_keys, int round)
 {
-	if (round < SECURITY_PARAM / 128) return;
+	if (round < AES_KEY_BITS / 128) return;
 
 	#ifdef __GNUC__
 	_Pragma(STRINGIZE(GCC unroll (2*AES_PREFERRED_WIDTH / KEYGEN_WIDTH)))
@@ -125,7 +125,7 @@ ALWAYS_INLINE void aes_keygen_round(
 	{
 		size_t chunk_size = num_keys - i < KEYGEN_WIDTH ? num_keys - i : KEYGEN_WIDTH;
 
-		if (SECURITY_PARAM != 192 || round % 3 < 2)
+		if (AES_KEY_BITS != 192 || round % 3 < 2)
 		{
 			// Undo ShiftRows operation, then apply RotWord.
 			block128 inv_shift_rows =
@@ -134,7 +134,7 @@ ALWAYS_INLINE void aes_keygen_round(
 				_mm_setr_epi8( 1, 14, 11,  4,  5,  2, 15,  8,  9,  6,  3, 12, 13, 10,  7,  0);
 
 			block128 perm, round_constant;
-			if (SECURITY_PARAM == 256 && round % 2 == 1)
+			if (AES_KEY_BITS == 256 && round % 2 == 1)
 			{
 				perm = inv_shift_rows;
 				round_constant = _mm_setzero_si128();
@@ -142,20 +142,20 @@ ALWAYS_INLINE void aes_keygen_round(
 			else
 			{
 				perm = rot_word_then_inv_shift_rows;
-				int idx = (2 * round + 1) / (SECURITY_PARAM / 64);
+				int idx = (2 * round + 1) / (AES_KEY_BITS / 64);
 				round_constant = _mm_set1_epi32(aes_round_constants[idx - 1]);
 			}
 
 			block128 sbox_out = _mm_aesenclast_si128(
 				_mm_shuffle_epi8(keygen_states->next_sbox, perm), round_constant);
 
-			size_t range_start = (SECURITY_PARAM == 192 && round % 3 == 1) ? 2 : 0;
-			size_t range_end = (SECURITY_PARAM == 192) ? 6 : 4;
+			size_t range_start = (AES_KEY_BITS == 192 && round % 3 == 1) ? 2 : 0;
+			size_t range_end = (AES_KEY_BITS == 192) ? 6 : 4;
 			for (size_t j = range_start; j < range_end; ++j)
 				keygen_states->key_slices[j] = block128_xor(keygen_states->key_slices[j], sbox_out);
 		}
 
-		if (SECURITY_PARAM != 192 || round % 3 == 2)
+		if (AES_KEY_BITS != 192 || round % 3 == 2)
 			keygen_states->next_sbox = keygen_states->key_slices[3];
 		else if (round % 3 == 0)
 			keygen_states->next_sbox = keygen_states->key_slices[5];
@@ -170,7 +170,7 @@ ALWAYS_INLINE void aes_keygen_round(
 			aeses[j].keys[round] = round_keys[j];
 
 		// Update round keys slices for next round.
-		if (SECURITY_PARAM == 192)
+		if (AES_KEY_BITS == 192)
 		{
 			shift2_mod6(&keygen_states->key_slices[0]);
 			size_t next_sbox_idx = (round % 3 + 1) * 2;
@@ -180,7 +180,7 @@ ALWAYS_INLINE void aes_keygen_round(
 		else
 		{
 			cumulative_xor(&keygen_states->key_slices[0], 4);
-			if (SECURITY_PARAM == 256)
+			if (AES_KEY_BITS == 256)
 				shift4_mod8(&keygen_states->key_slices[0]);
 		}
 	}
@@ -194,15 +194,15 @@ ALWAYS_INLINE void aes_keygen_impl(
 	aes_keygen_state keygen_states[AES_PREFERRED_WIDTH / KEYGEN_WIDTH];
 	aes_keygen_init(keygen_states, aeses, keys, num_keys);
 
-#if SECURITY_PARAM == 128
+#if AES_KEY_BITS == 128
 	int round_start = 1;
 	int round_end = AES_ROUNDS - 1;
 	int unroll_rounds = 1;
-#elif SECURITY_PARAM == 192
+#elif AES_KEY_BITS == 192
 	int round_start = 1;
 	int round_end = AES_ROUNDS - 1;
 	int unroll_rounds = 3;
-#elif SECURITY_PARAM == 256
+#elif AES_KEY_BITS == 256
 	int round_start = 2;
 	int round_end = AES_ROUNDS - 2;
 	int unroll_rounds = 2;

@@ -4,6 +4,7 @@ const uint32_t gf64_modulus  = (1 << 4) | (1 << 3) | (1 << 1) | 1;
 const uint32_t gf128_modulus = (1 << 7) | (1 << 2) | (1 << 1) | 1;
 const uint32_t gf192_modulus = (1 << 7) | (1 << 2) | (1 << 1) | 1;
 const uint32_t gf256_modulus = (1 << 10) | (1 << 5) | (1 << 2) | 1;
+const uint32_t gf512_modulus = (1 << 8) | (1 << 5) | (1 << 2) | 1;
 
 const unsigned char gf_in_gf128[128][16] = {
 	{0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -770,3 +771,4 @@ DEFINE_POLY_EXP(64, 128)
 DEFINE_POLY_EXP(128, 256)
 DEFINE_POLY_EXP(192, 384)
 DEFINE_POLY_EXP(256, 512)
+DEFINE_POLY_EXP(512, 1024)

@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include "faest.h"
 #include "faest_details.h"
 
@@ -5,20 +9,41 @@
 #include <stdalign.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 #include "hash.h"
 #include "owf_proof.h"
 #include "small_vole.h"
 #include "vole_commit.h"
 #include "util.h"
+#include "greatwall.h"
+#include <stdio.h>
+
+static void* faest_aligned_alloc(size_t alignment, size_t size)
+{
+#if defined(_WIN32)
+	return _aligned_malloc(size, alignment);
+#else
+	void* ptr = NULL;
+	if (posix_memalign(&ptr, alignment, size) != 0)
+		return NULL;
+	return ptr;
+#endif
+}
+
+static void faest_aligned_free(void* ptr)
+{
+#if defined(_WIN32)
+	_aligned_free(ptr);
+#else
+	free(ptr);
+#endif
+}
 
 void faest_free_public_key(public_key* pk)
 {
-#if defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-	free(pk->mq_A_b);
-	pk->mq_A_b = NULL;
-#else
 	(void) pk;
-#endif
 }
 
 void faest_free_secret_key(secret_key* sk)
@@ -29,21 +54,17 @@ void faest_free_secret_key(secret_key* sk)
 // done
 bool faest_unpack_secret_key(secret_key* unpacked, const uint8_t* packed)
 {
-	memcpy(&unpacked->pk.owf_input, packed, sizeof(unpacked->pk.owf_input));				// for MQ, here goes the seed
-	memcpy(&unpacked->sk, packed + sizeof(unpacked->pk.owf_input), sizeof(unpacked->sk));	// for MQ, here goes the x
 
-#if defined(OWF_AES_CTR)
-	aes_keygen(&unpacked->round_keys, unpacked->sk);
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-	rijndael_keygen(&unpacked->pk.fixed_key, unpacked->pk.owf_input[0]);
-#elif defined(OWF_RAIN_3) || defined(OWF_RAIN_4)
-	// I do not think, here anything needs to be done for Rain. We can directly call the faest_compute_witness as rain uses the sk for everyround
-		// and does not have rk
-#elif defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-	unpacked->pk.mq_A_b = aligned_alloc(alignof(block_secpar), MQ_A_B_LENGTH * sizeof(block_secpar));
-	mq_initialize(unpacked->sk, unpacked->pk.owf_input[0], unpacked->pk.mq_A_b, unpacked->pk.mq_y_gfsecpar, unpacked->pk.owf_output);
+	// memcpy(&unpacked->sk, packed, sizeof(unpacked->sk));
+#if SECURITY_PARAM == 128
+	block137_load_to_block(&unpacked->sk, packed);
+#elif SECURITY_PARAM == 192
+	block193_load_to_block(&unpacked->sk, packed);
+#elif SECURITY_PARAM == 256
+	block257_load_to_block(&unpacked->sk, packed);
+#elif SECURITY_PARAM == 512
+	block521_load_to_block(&unpacked->sk, packed);
 #endif
-
 	if (!faest_compute_witness(unpacked))
 	{
 		faest_free_secret_key(unpacked);
@@ -56,161 +77,231 @@ bool faest_unpack_secret_key(secret_key* unpacked, const uint8_t* packed)
 // nothing to do here i guess
 void faest_pack_public_key(uint8_t* packed, const public_key* unpacked)
 {
-	memcpy(packed, &unpacked->owf_input, sizeof(unpacked->owf_input));
-	memcpy(packed + sizeof(unpacked->owf_input), &unpacked->owf_output[0], sizeof(unpacked->owf_output));
+#if SECURITY_PARAM == 128
+	block137_store_from_block(packed, &unpacked->owf_output);
+#elif SECURITY_PARAM == 192
+	block193_store_from_block(packed, &unpacked->owf_output);
+#elif SECURITY_PARAM == 256
+	block257_store_from_block(packed, &unpacked->owf_output);
+#elif SECURITY_PARAM == 512
+	block521_store_from_block(packed, &unpacked->owf_output);
+#endif
 }
 
 
 void faest_unpack_public_key(public_key* unpacked, const uint8_t* packed)
 {
-	memcpy(&unpacked->owf_input, packed, sizeof(unpacked->owf_input));
-	memcpy(&unpacked->owf_output[0], packed + sizeof(unpacked->owf_input), sizeof(unpacked->owf_output));
-#if defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-	rijndael_keygen(&unpacked->fixed_key, unpacked->owf_input[0]);
-#elif defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-	unpacked->mq_A_b = aligned_alloc(alignof(block_secpar), MQ_A_B_LENGTH * sizeof(block_secpar));
-	mq_initialize_pk(unpacked->owf_input[0], unpacked->owf_output, unpacked->mq_A_b, unpacked->mq_y_gfsecpar);
+#if SECURITY_PARAM == 128
+	block137_load_to_block(&unpacked->owf_output, packed);
+#elif SECURITY_PARAM == 192
+	block193_load_to_block(&unpacked->owf_output, packed);
+#elif SECURITY_PARAM == 256
+	block257_load_to_block(&unpacked->owf_output, packed);
+#elif SECURITY_PARAM == 512
+	block521_load_to_block(&unpacked->owf_output, packed);
 #endif
 }
 
+#include <inttypes.h>
+
+void print_block137_hex(const block137* b) {
+}
+void print_block193_hex(const block193* b) {
+}
+
+void print_block257_hex(const block257* b) {
+}
+
+void print_block521_hex(const block521* b)
+{
+}
 // done
 bool faest_compute_witness(secret_key* sk)
 {
-
-#if defined(OWF_MQ_2_1) || defined(OWF_MQ_2_8)
-
-	// Setting key
-	uint8_t* w_ptr = (uint8_t*) &sk->witness;
-	memcpy(w_ptr, sk->sk, MQ_N_BYTES);
-	w_ptr += (MQ_M*MQ_GF_BITS)/8;
-
-	return true;
-#else
+	memset(&sk->witness, 0, sizeof(sk->witness));
+#if SECURITY_PARAM == 128
 	uint8_t* w_ptr = (uint8_t*) &sk->witness;
 
-	memcpy(w_ptr, &sk->sk, sizeof(sk->sk));
-	w_ptr += sizeof(sk->sk);
+	block137_store_from_block(w_ptr, &sk->sk);
+	w_ptr += GREATWALL_SECRET_KEY_BYTES;
+	block137 state = sk->sk;
+	print_block137_hex(&state);
+	block137 rc0, rc1, rc2;
+	block137_load_words(&rc0, greatwall_rc_137[0]);
+	block137_load_words(&rc1, greatwall_rc_137[1]);
+	block137_load_words(&rc2, greatwall_rc_137[2]);
 
-#if defined(OWF_AES_CTR)
-	// Extract witness for key schedule.
-	for (size_t i = SECURITY_PARAM / 8; i < OWF_BLOCK_SIZE * (OWF_ROUNDS + 1);
-	     i += OWF_KEY_SCHEDULE_PERIOD, w_ptr += 4)
-	{
-		uint32_t prev_word, word;
-		memcpy(&prev_word, ((uint8_t*) &sk->round_keys.keys[0]) + i - SECURITY_PARAM / 8, 4);
-		memcpy(&word, ((uint8_t*) &sk->round_keys.keys[0]) + i, 4);
-		memcpy(w_ptr, &word, 4);
+	block137_multiply_with_GF2_matrix(&state, greatwall_mat_137_0);
+	print_block137_hex(&state);
+	state = block137_xor(state, rc0);
+	print_block137_hex(&state);
+	block137_mersenne_inverse1(&state);
 
-		uint32_t sbox_output = word ^ prev_word;
-		if (SECURITY_PARAM != 256 || i % (SECURITY_PARAM / 8) == 0)
-			sbox_output ^= aes_round_constants[i / (SECURITY_PARAM / 8) - 1];
+	print_block137_hex(&state);
 
-		// https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
-		sbox_output ^= 0x63636363; // AES SBox maps 0 to 0x63.
-		if ((sbox_output - 0x01010101) & ~sbox_output & 0x80808080)
-			return false;
-	}
-#endif
+	block137_store_from_block(w_ptr, &state);
+	w_ptr += GREATWALL_SECRET_KEY_BYTES;
 
-#if defined(OWF_AES_CTR)
-	for (uint32_t i = 0; i < OWF_BLOCKS; ++i)
-		sk->pk.owf_output[i] =
-			owf_block_xor(sk->round_keys.keys[0], sk->pk.owf_input[i]);
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-	static_assert(OWF_BLOCKS == 1, "");
-	sk->pk.owf_output[0] = owf_block_xor(sk->pk.fixed_key.keys[0], sk->sk);
-#elif defined(OWF_RAIN_3)	// This should be similar to EM, except I will add the sk later in the round function call
-	static_assert(OWF_BLOCKS == 1, "");
-	sk->pk.owf_output[0] = sk->pk.owf_input[0];
-#elif defined(OWF_RAIN_4)	// This should be similar to EM, except I will add the sk later in the round function call
-	static_assert(OWF_BLOCKS == 1, "");
-	sk->pk.owf_output[0] = sk->pk.owf_input[0];
-#endif
+	state = block137_xor(state, sk->sk);
+	block137_multiply_with_GF2_matrix(&state, greatwall_mat_137_1);
+	state = block137_xor(state, rc1);
+	block137 tmp = state;
+	block137_mersenne_inverse2(&state);
+	block137_multiply_with_GF2_matrix(&state, greatwall_mat_137_2);
+	state = block137_xor(state, rc2);
+	state = block137_xor(state, tmp);
+	state = block137_xor(state, sk->sk);
 
-	for (unsigned int round = 1; round <= OWF_ROUNDS; ++round)
-	{
-		for (uint32_t i = 0; i < OWF_BLOCKS; ++i)
-		{
-			#if defined(OWF_AES_CTR) || defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-			// The block is about to go into the SBox, so check for zeros.
-			if (owf_block_any_zeros(sk->pk.owf_output[i]))
-				return false;
-			#endif
+	sk->pk.owf_output = state;
 
-			owf_block after_sbox;
-#if defined(OWF_AES_CTR)
-			aes_round_function(&sk->round_keys, &sk->pk.owf_output[i], &after_sbox, round);
-#elif defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-	#if SECURITY_PARAM == 128
-			aes_round_function(&sk->pk.fixed_key, &sk->pk.owf_output[i], &after_sbox, round);
-	#elif SECURITY_PARAM == 192
-			rijndael192_round_function(&sk->pk.fixed_key, &sk->pk.owf_output[i], &after_sbox, round);
-	#elif SECURITY_PARAM == 256
-			rijndael256_round_function(&sk->pk.fixed_key, &sk->pk.owf_output[i], &after_sbox, round);
-	#endif
-#elif defined(OWF_RAIN_3)
-	#if SECURITY_PARAM == 128
-			if (round != OWF_ROUNDS) {
-				rain_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_128[round-1],rain_mat_128[(round-1)*128],(uint64_t*)&after_sbox);
-			} else {
-				rain_last_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_128[round-1]);
-			}
-	#elif SECURITY_PARAM == 192
-			if (round != OWF_ROUNDS) {
-				rain_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_192[round-1],rain_mat_192[(round-1)*192],(uint64_t*)&after_sbox);
-			} else {
-				rain_last_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_192[round-1]);
-			}
-	#elif SECURITY_PARAM == 256
-			if (round != OWF_ROUNDS) {
-				rain_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_256[round-1],rain_mat_256[(round-1)*256],(uint64_t*)&after_sbox);
-			} else {
-				rain_last_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_256[round-1]);
-			}
+#elif SECURITY_PARAM == 192
 
-	#endif
-#elif defined(OWF_RAIN_4)
-	#if SECURITY_PARAM == 128
-		if (round != OWF_ROUNDS) {
-			rain_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_128[round-1],rain_mat_128[(round-1)*128],(uint64_t*)&after_sbox);
-		} else {
-			rain_last_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_128[round-1]);
-		}
-	#elif SECURITY_PARAM == 192
-		if (round != OWF_ROUNDS) {
-			rain_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_192[round-1],rain_mat_192[(round-1)*192],(uint64_t*)&after_sbox);
-		} else {
-			rain_last_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_192[round-1]);
-		}
-	#elif SECURITY_PARAM == 256
-		if (round != OWF_ROUNDS) {
-			rain_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_256[round-1],rain_mat_256[(round-1)*256],(uint64_t*)&after_sbox);
-		} else {
-			rain_last_round_function((uint64_t*)&sk->pk.owf_output[i],(uint64_t*)&sk->sk,rain_rc_256[round-1]);
-		}
-	#endif
-#endif
+    uint8_t* w_ptr = (uint8_t*) &sk->witness;
 
-			if (round < OWF_ROUNDS)
-				memcpy(w_ptr + i * sizeof(owf_block) * (OWF_ROUNDS - 1), &after_sbox, sizeof(owf_block));
-		}
+    // sk -> witness
+    block193_store_from_block(w_ptr, &sk->sk);
+    w_ptr += GREATWALL_SECRET_KEY_BYTES;
 
-		if (round < OWF_ROUNDS)
-			w_ptr += sizeof(owf_block);
-	}
+    block193 state = sk->sk;
+    print_block193_hex(&state);
 
-	w_ptr += (OWF_BLOCKS - 1) * sizeof(owf_block) * (OWF_ROUNDS - 1);
-	assert(w_ptr - (uint8_t*) &sk->witness == WITNESS_BITS / 8);
-	memset(w_ptr, 0, sizeof(sk->witness) - WITNESS_BITS / 8);
+    block193 rc0, rc1, rc2;
+    block193_load_words(&rc0, greatwall_rc_193[0]);
+    block193_load_words(&rc1, greatwall_rc_193[1]);
+    block193_load_words(&rc2, greatwall_rc_193[2]);
 
-#if defined(OWF_RIJNDAEL_EVEN_MANSOUR)
-	for (uint32_t i = 0; i < OWF_BLOCKS; ++i)
-		sk->pk.owf_output[i] = owf_block_xor(sk->pk.owf_output[i], sk->sk);
+    // round 1
+    block193_multiply_with_GF2_matrix(&state, greatwall_mat_193_0);
+    print_block193_hex(&state);
+
+    state = block193_xor(state, rc0);
+    print_block193_hex(&state);
+
+    block193_mersenne_inverse1(&state);
+    print_block193_hex(&state);
+
+    block193_store_from_block(w_ptr, &state);
+    w_ptr += GREATWALL_SECRET_KEY_BYTES;
+
+    // round 2
+    state = block193_xor(state, sk->sk);
+
+    block193_multiply_with_GF2_matrix(&state, greatwall_mat_193_1);
+
+    state = block193_xor(state, rc1);
+
+    block193 tmp = state;
+
+    block193_mersenne_inverse2(&state);
+
+    block193_multiply_with_GF2_matrix(&state, greatwall_mat_193_2);
+
+    state = block193_xor(state, rc2);
+
+    state = block193_xor(state, tmp);
+    state = block193_xor(state, sk->sk);
+
+    sk->pk.owf_output = state;
+
+#elif SECURITY_PARAM == 256
+
+    uint8_t* w_ptr = (uint8_t*) &sk->witness;
+
+    // sk -> witness
+    block257_store_from_block(w_ptr, &sk->sk);
+    w_ptr += GREATWALL_SECRET_KEY_BYTES;   // 257-bit: 33 bytes
+
+    block257 state = sk->sk;
+    print_block257_hex(&state);
+
+    block257 rc0, rc1, rc2;
+    block257_load_words(&rc0, greatwall_rc_257[0]);
+    block257_load_words(&rc1, greatwall_rc_257[1]);
+    block257_load_words(&rc2, greatwall_rc_257[2]);
+
+    // round 1
+    block257_multiply_with_GF2_matrix(&state, greatwall_mat_257_0);
+    print_block257_hex(&state);
+
+    state = block257_xor(state, rc0);
+    print_block257_hex(&state);
+
+    block257_mersenne_inverse1(&state);
+    print_block257_hex(&state);
+
+    block257_store_from_block(w_ptr, &state);
+    w_ptr += GREATWALL_SECRET_KEY_BYTES;
+
+    // round 2
+    state = block257_xor(state, sk->sk);
+
+    block257_multiply_with_GF2_matrix(&state, greatwall_mat_257_1);
+
+    state = block257_xor(state, rc1);
+
+    block257 tmp = state;
+
+    block257_mersenne_inverse2(&state);
+
+    block257_multiply_with_GF2_matrix(&state, greatwall_mat_257_2);
+
+    state = block257_xor(state, rc2);
+
+    state = block257_xor(state, tmp);
+    state = block257_xor(state, sk->sk);
+
+    sk->pk.owf_output = state;
+#elif SECURITY_PARAM == 512
+
+    uint8_t* w_ptr = (uint8_t*) &sk->witness;
+
+    // sk -> witness
+    block521_store_from_block(w_ptr, &sk->sk);
+    w_ptr += GREATWALL_SECRET_KEY_BYTES;   // 521-bit: 66 bytes
+
+    block521 state = sk->sk;
+    print_block521_hex(&state);
+
+    block521 rc0, rc1, rc2;
+    block521_load_words(&rc0, greatwall_rc_521[0]);
+    block521_load_words(&rc1, greatwall_rc_521[1]);
+    block521_load_words(&rc2, greatwall_rc_521[2]);
+
+    // round 1
+    block521_multiply_with_GF2_matrix(&state, greatwall_mat_521_0);
+    print_block521_hex(&state);
+
+    state = block521_xor(state, rc0);
+    print_block521_hex(&state);
+
+    block521_mersenne_inverse1(&state);
+    print_block521_hex(&state);
+
+    block521_store_from_block(w_ptr, &state);
+    w_ptr += GREATWALL_SECRET_KEY_BYTES;
+
+    // round 2
+    state = block521_xor(state, sk->sk);
+
+    block521_multiply_with_GF2_matrix(&state, greatwall_mat_521_1);
+
+    state = block521_xor(state, rc1);
+
+    block521 tmp = state;
+
+    block521_mersenne_inverse2(&state);
+
+    block521_multiply_with_GF2_matrix(&state, greatwall_mat_521_2);
+
+    state = block521_xor(state, rc2);
+
+    state = block521_xor(state, tmp);
+    state = block521_xor(state, sk->sk);
+
+    sk->pk.owf_output = state;
 #endif
 
 	return true;
-
-#endif
 }
 // done
 bool faest_unpack_sk_and_get_pubkey(uint8_t* pk_packed, const uint8_t* sk_packed, secret_key* sk)
@@ -237,12 +328,10 @@ static bool faest_sign_attempt(
 	const secret_key* sk, const uint8_t* pk_packed,
 	const uint8_t* random_seed, size_t random_seed_len, uint64_t attempt_num)
 {
-	// TODO: Do we need to domain separate by the faest parameters?
-
 	block_2secpar mu;
 	hash_state hasher;
 	hash_init(&hasher);
-	hash_update(&hasher, pk_packed, FAEST_PUBLIC_KEY_BYTES);
+	hash_update(&hasher, pk_packed, GREATWALL_PUBLIC_KEY_BYTES);
 	hash_update(&hasher, msg, msg_len);
 	hash_update_byte(&hasher, 1);
 	hash_final(&hasher, &mu, sizeof(mu));
@@ -252,7 +341,23 @@ static bool faest_sign_attempt(
 	uint8_t seed_iv[sizeof(seed) + sizeof(iv)];
 
 	hash_init(&hasher);
-	hash_update(&hasher, &sk->sk, sizeof(sk->sk));
+	uint8_t sk_packed[GREATWALL_SECRET_KEY_BYTES];
+#if SECURITY_PARAM == 128
+	block137_store_from_block(sk_packed, &sk->sk);
+
+#elif SECURITY_PARAM == 192
+
+	block193_store_from_block(sk_packed, &sk->sk);
+
+#elif SECURITY_PARAM == 256
+
+	block257_store_from_block(sk_packed, &sk->sk);
+
+#elif SECURITY_PARAM == 512
+
+	block521_store_from_block(sk_packed, &sk->sk);
+#endif
+	hash_update(&hasher, sk_packed, GREATWALL_SECRET_KEY_BYTES);
 	hash_update(&hasher, &mu, sizeof(mu));
 	if (random_seed)
 		hash_update(&hasher, random_seed, random_seed_len);
@@ -278,13 +383,13 @@ static bool faest_sign_attempt(
 	memcpy(&iv, &seed_iv[sizeof(seed)], sizeof(iv));
 
 	block_secpar* forest =
-		aligned_alloc(alignof(block_secpar), FOREST_SIZE * sizeof(block_secpar));
+		faest_aligned_alloc(alignof(block_secpar), FOREST_SIZE * sizeof(block_secpar));
 	block_2secpar* hashed_leaves =
-		aligned_alloc(alignof(block_2secpar), VECTOR_COMMIT_LEAVES * sizeof(block_2secpar));
+		faest_aligned_alloc(alignof(block_2secpar), VECTOR_COMMIT_LEAVES * sizeof(block_2secpar));
 	vole_block* u =
-		aligned_alloc(alignof(vole_block), VOLE_COL_BLOCKS * sizeof(vole_block));
+		faest_aligned_alloc(alignof(vole_block), VOLE_COL_BLOCKS * sizeof(vole_block));
 	vole_block* v =
-		aligned_alloc(alignof(vole_block), SECURITY_PARAM * VOLE_COL_BLOCKS * sizeof(vole_block));
+		faest_aligned_alloc(alignof(vole_block), SECURITY_PARAM * VOLE_COL_BLOCKS * sizeof(vole_block));
 	uint8_t vole_commit_check[VOLE_COMMIT_CHECK_SIZE];
 
 	vole_commit(seed, iv, forest, hashed_leaves, u, v, signature, vole_commit_check);
@@ -325,12 +430,12 @@ static bool faest_sign_attempt(
 	hash_final(&hasher, &chal2[0], sizeof(chal2));
 
 	block_secpar* macs =
-		aligned_alloc(alignof(block_secpar), QUICKSILVER_ROWS_PADDED * sizeof(block_secpar));
+		faest_aligned_alloc(alignof(block_secpar), QUICKSILVER_ROWS_PADDED * sizeof(block_secpar));
 
 	memcpy(&u[0], &sk->witness[0], WITNESS_BITS / 8);
 	static_assert(QUICKSILVER_ROWS_PADDED % TRANSPOSE_BITS_ROWS == 0, "");
 	transpose_secpar(v, macs, VOLE_COL_STRIDE, QUICKSILVER_ROWS_PADDED);
-	free(v);
+	faest_aligned_free(v);
 
 	quicksilver_state qs;
 	quicksilver_init_prover(&qs, (uint8_t*) &u[0], macs, OWF_NUM_CONSTRAINTS, chal2);
@@ -339,8 +444,8 @@ static bool faest_sign_attempt(
 	uint8_t* qs_proof = correction + WITNESS_BITS / 8;
 	uint8_t qs_check[QUICKSILVER_CHECK_BYTES];
 	quicksilver_prove(&qs, WITNESS_BITS, qs_proof, qs_check);
-	free(macs);
-	free(u);
+	faest_aligned_free(macs);
+	faest_aligned_free(u);
 
 	uint8_t* veccom_open_start = qs_proof + QUICKSILVER_PROOF_BYTES;
 	uint8_t* delta = veccom_open_start + VECTOR_COM_OPEN_SIZE;
@@ -368,8 +473,8 @@ static bool faest_sign_attempt(
 	bool open_success = force_vector_open(forest, hashed_leaves, delta, veccom_open_start, hash_prefix, sizeof(chal2) + QUICKSILVER_PROOF_BYTES + QUICKSILVER_CHECK_BYTES, &counter);
 #endif
 
-	free(forest);
-	free(hashed_leaves);
+	faest_aligned_free(forest);
+	faest_aligned_free(hashed_leaves);
 
 	if (!open_success)
 		return false;
@@ -399,7 +504,7 @@ bool faest_sign(
 	const uint8_t* random_seed, size_t random_seed_len)
 {
 	secret_key sk;
-	uint8_t pk_packed[FAEST_PUBLIC_KEY_BYTES];
+	uint8_t pk_packed[GREATWALL_PUBLIC_KEY_BYTES];
 	if (!faest_unpack_sk_and_get_pubkey(pk_packed, sk_packed, &sk))
 		return false;
 
@@ -425,7 +530,7 @@ bool faest_verify(const uint8_t* signature, const uint8_t* msg, size_t msg_len,
 	block_2secpar mu;
 	hash_state hasher;
 	hash_init(&hasher);
-	hash_update(&hasher, pk_packed, FAEST_PUBLIC_KEY_BYTES);
+	hash_update(&hasher, pk_packed, GREATWALL_PUBLIC_KEY_BYTES);
 	hash_update(&hasher, msg, msg_len);
 	hash_update_byte(&hasher, 1);
 	hash_final(&hasher, &mu, sizeof(mu));
@@ -445,13 +550,13 @@ bool faest_verify(const uint8_t* signature, const uint8_t* msg, size_t msg_len,
 		delta_bytes[i] = expand_bit_to_byte(delta[i / 8], i % 8);
 
 	vole_block* q =
-		aligned_alloc(alignof(vole_block), SECURITY_PARAM * VOLE_COL_BLOCKS * sizeof(vole_block));
+		faest_aligned_alloc(alignof(vole_block), SECURITY_PARAM * VOLE_COL_BLOCKS * sizeof(vole_block));
 	uint8_t vole_commit_check[VOLE_COMMIT_CHECK_SIZE];
 
 	memcpy(&iv, iv_ptr, sizeof(iv));
 	bool reconstruct_success =  vole_reconstruct(iv, q, delta_bytes, signature, veccom_open_start, vole_commit_check);
 	if (reconstruct_success == 0){
-		free(q);
+		faest_aligned_free(q);
 		return 0;
 	}
 
@@ -483,9 +588,9 @@ bool faest_verify(const uint8_t* signature, const uint8_t* msg, size_t msg_len,
 	vole_receiver_apply_correction(WITNESS_BLOCKS, NONZERO_BITS_IN_CHALLENGE_3, correction_blocks, q, delta_bytes);
 
 	block_secpar* macs =
-		aligned_alloc(alignof(block_secpar), VOLE_ROWS_PADDED * sizeof(block_secpar));
+		faest_aligned_alloc(alignof(block_secpar), VOLE_ROWS_PADDED * sizeof(block_secpar));
 	transpose_secpar(q, macs, VOLE_COL_STRIDE, QUICKSILVER_ROWS_PADDED);
-	free(q);
+	faest_aligned_free(q);
 
 	block_secpar delta_block;
 	memcpy(&delta_block, delta, sizeof(delta_block));
@@ -498,10 +603,9 @@ bool faest_verify(const uint8_t* signature, const uint8_t* msg, size_t msg_len,
 	owf_constraints_verifier(&qs, &pk);
 
 	faest_free_public_key(&pk);
-
 	uint8_t qs_check[QUICKSILVER_CHECK_BYTES];
 	quicksilver_verify(&qs, WITNESS_BITS, qs_proof, qs_check);
-	free(macs);
+	faest_aligned_free(macs);
 
 	block_secpar delta_check;
 	hash_init(&hasher);

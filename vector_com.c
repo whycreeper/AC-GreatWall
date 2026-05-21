@@ -1,8 +1,15 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include "vector_com.h"
 #include <assert.h>
 #include <stdalign.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 #include "prgs.h"
 #include "small_vole.h"
@@ -19,6 +26,27 @@
 #define MAX_CHUNK_SIZE_SHIFT \
 	(LEAF_CHUNK_SIZE_SHIFT > TREE_CHUNK_SIZE_SHIFT ? LEAF_CHUNK_SIZE_SHIFT : TREE_CHUNK_SIZE_SHIFT)
 #define MAX_CHUNK_SIZE (LEAF_CHUNK_SIZE > TREE_CHUNK_SIZE ? LEAF_CHUNK_SIZE : TREE_CHUNK_SIZE)
+
+static void* vector_com_aligned_alloc(size_t alignment, size_t size)
+{
+#if defined(_WIN32)
+	return _aligned_malloc(size, alignment);
+#else
+	void* ptr = NULL;
+	if (posix_memalign(&ptr, alignment, size) != 0)
+		return NULL;
+	return ptr;
+#endif
+}
+
+static void vector_com_aligned_free(void* ptr)
+{
+#if defined(_WIN32)
+	_aligned_free(ptr);
+#else
+	free(ptr);
+#endif
+}
 
 static ALWAYS_INLINE void copy_prg_output(
 	bool leaf, size_t n, size_t stretch, uint32_t j, uint32_t num_blocks, size_t num_bytes,
@@ -466,7 +494,7 @@ bool vector_verify(
 	prg_leaf_fixed_key fixed_key_leaf;
 	init_fixed_keys(&fixed_key_tree, &fixed_key_leaf, fixed_key_iv);
 
-	block_secpar* verifier_subtrees = aligned_alloc(
+	block_secpar* verifier_subtrees = vector_com_aligned_alloc(
 		alignof(block_secpar),
 		TREES_IN_FOREST(true) * ((1 << VOLE_MAX_K) - 1) * sizeof(block_secpar));
 
@@ -557,7 +585,7 @@ bool vector_verify(
 		delta += tree_depth;
 	}
 
-	free(verifier_subtrees);
+	vector_com_aligned_free(verifier_subtrees);
 	return true;
 }
 
@@ -604,7 +632,7 @@ void batch_vector_commit(
 	}
 
 	// expand leaves
-	block_secpar *prg_output = aligned_alloc(alignof(block_secpar), 3*BATCH_VECTOR_COMMIT_LEAVES * sizeof(block_secpar));
+	block_secpar *prg_output = vector_com_aligned_alloc(alignof(block_secpar), 3*BATCH_VECTOR_COMMIT_LEAVES * sizeof(block_secpar));
 	for (size_t i = 0; i < BATCH_VECTOR_COMMIT_LEAVES; i+= LEAF_CHUNK_SIZE)
 	{
 		expand_chunk_leaf_n_leaf_chunk_size(iv, &fixed_key_leaf, tree + BATCH_VECTOR_COMMIT_LEAVES - 1 + i, prg_output + 3*i);
@@ -622,7 +650,7 @@ void batch_vector_commit(
 			memcpy(hashed_leaves + BATCH_VEC_HASH_POS_IN_OUTPUT(vec_index, leaf_index), prg_output + 3*(BATCH_VEC_POS_IN_TREE(vec_index, leaf_index) - BATCH_VECTOR_COMMIT_LEAVES + 1) + 1, sizeof(block_2secpar));
 		}
 	}
-	free(prg_output);
+	vector_com_aligned_free(prg_output);
 }
 
 bool force_vector_open(const block_secpar* restrict forest, const block_2secpar* restrict hashed_leaves, uint8_t* restrict delta_out, unsigned char* restrict opening, const unsigned char *message, size_t m_len, uint32_t *out_counter){
@@ -794,7 +822,7 @@ bool batch_vector_verify(
 	prg_leaf_fixed_key fixed_key_leaf;
 	init_fixed_keys(&fixed_key_tree, &fixed_key_leaf, fixed_key_iv);
 	block_secpar* tree =
-		aligned_alloc(alignof(block_secpar), BATCH_VECTOR_COMMIT_NODES * sizeof(block_secpar));
+		vector_com_aligned_alloc(alignof(block_secpar), BATCH_VECTOR_COMMIT_NODES * sizeof(block_secpar));
 
 	uint8_t dont_reveal[BATCH_VECTOR_COMMIT_NODES] = {0};
 	size_t opening_bytes_read = 0;
@@ -874,6 +902,6 @@ bool batch_vector_verify(
 		}
 	}
 end:
-	free(tree);
+	vector_com_aligned_free(tree);
 	return success;
 }
